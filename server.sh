@@ -2,15 +2,15 @@
 set -eux
 cd `dirname $0`
 
-cargo fmt
+cargo fmt --all
 cargo build --all --release
 
 NETWORK=$1
 shift
 
-DB=./db1  # $HOME/tmp/electrs_db/mainnet_zstd
-QUERY="target/release/electrs_rpc --network $NETWORK --db-dir $DB --daemon-dir $HOME/.bitcoin"
+DB=./db2  # $HOME/tmp/electrs_db/mainnet_zstd
+CMD="target/release/electrs --network $NETWORK --db-dir $DB --daemon-dir $HOME/.bitcoin"
 export RUST_LOG=${RUST_LOG-info}
-$QUERY $*
+$CMD $*
 
 # use SIGINT to quit

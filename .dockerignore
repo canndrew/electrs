@@ -1,7 +1,7 @@
 .*
 _*
 contrib
-db
+db*
 dist
 doc
 Dockerfile

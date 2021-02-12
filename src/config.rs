@@ -40,15 +40,19 @@ impl Into<Network> for BitcoinNetwork {
     }
 }
 
+/// Configuration for electrs
 #[derive(Debug)]
 pub struct Config {
+    pub network: Network,
     pub electrum_rpc_addr: SocketAddr,
     pub daemon_rpc_addr: SocketAddr,
+    pub daemon_p2p_addr: SocketAddr,
+    pub daemon_cookie_file: PathBuf,
     pub monitoring_addr: SocketAddr,
     pub db_path: PathBuf,
     pub daemon_dir: PathBuf,
     pub wait_duration: Duration,
-    pub low_memory: bool,
+    pub index_batch_size: usize,
     pub args: Vec<String>,
 }
 
@@ -67,13 +71,21 @@ impl Config {
         };
         let electrum_rpc_addr: SocketAddr = ([127, 0, 0, 1], electrum_port).into();
 
-        let daemon_port = match config.network {
+        let daemon_rpc_port = match config.network {
             Network::Bitcoin => 8332,
             Network::Testnet => 18332,
             Network::Regtest => 18443,
             Network::Signet => 38332,
         };
-        let daemon_rpc_addr: SocketAddr = ([127, 0, 0, 1], daemon_port).into();
+        let daemon_rpc_addr: SocketAddr = ([127, 0, 0, 1], daemon_rpc_port).into();
+
+        let daemon_p2p_port = match config.network {
+            Network::Bitcoin => 8333,
+            Network::Testnet => 18333,
+            Network::Regtest => 18444,
+            Network::Signet => 38333,
+        };
+        let daemon_p2p_addr: SocketAddr = ([127, 0, 0, 1], daemon_p2p_port).into();
 
         let monitoring_port = match config.network {
             Network::Bitcoin => 4224,
@@ -92,13 +104,16 @@ impl Config {
         };
 
         let config = Self {
+            network: config.network,
             electrum_rpc_addr,
             daemon_rpc_addr,
+            daemon_p2p_addr,
+            daemon_cookie_file: daemon_dir.join(".cookie"),
             monitoring_addr,
             db_path: config.db_dir.join(config.network.to_string()),
             daemon_dir,
-            wait_duration: Duration::from_secs(600),
-            low_memory: config.low_memory,
+            wait_duration: Duration::from_secs(10),
+            index_batch_size: config.index_batch_size,
             args,
         };
         eprintln!("{:?}", config);

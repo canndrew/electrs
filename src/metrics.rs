@@ -1,9 +1,8 @@
 use anyhow::{Context, Result};
 use hyper::server::{Handler, Listening, Request, Response, Server};
 use prometheus::{
-    self, process_collector::ProcessCollector, Encoder, HistogramOpts, HistogramVec, Opts, Registry,
+    self, process_collector::ProcessCollector, Encoder, HistogramOpts, HistogramVec, Registry,
 };
-pub use prometheus::{Gauge, GaugeVec};
 
 use std::net::SocketAddr;
 
@@ -84,22 +83,5 @@ impl Metrics {
             .register(Box::new(hist.clone()))
             .expect("failed to register Histogram");
         Histogram { hist }
-    }
-
-    pub fn gauge(&self, name: &str, desc: &str) -> Gauge {
-        let gauge = Gauge::new(name, desc).unwrap();
-        self.reg
-            .register(Box::new(gauge.clone()))
-            .expect("failed to register Gauge");
-        gauge
-    }
-
-    pub fn gauge_vec(&self, name: &str, desc: &str, label: &str) -> GaugeVec {
-        let opts = Opts::new(name, desc);
-        let gauge_vec = GaugeVec::new(opts, &[label]).unwrap();
-        self.reg
-            .register(Box::new(gauge_vec.clone()))
-            .expect("failed to register GaugeVec");
-        gauge_vec
     }
 }
