@@ -1,0 +1,14 @@
+[package]
+name = "rpc-macro"
+version = "0.1.0"
+authors = ["Andrew Cann <shum@canndrew.org>"]
+edition = "2018"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = "*"
+quote = "*"
+proc-macro2 = "*"
+

@@ -234,9 +234,12 @@ where
 mod test {
     use super::*;
 
-    use tokio::net::TcpListener;
+    use pin_utils::pin_mut;
+    use std::time::Duration;
+    use tokio::net::{TcpStream, TcpListener};
+    use tokio::io::AsyncReadExt;
     use tokio_stream::wrappers::TcpListenerStream;
-    use futures::StreamExt;
+    use futures::{FutureExt, StreamExt};
 
     struct TestService;
 
@@ -244,10 +247,70 @@ mod test {
     impl JsonRpcService for TestService {
         async fn handle_method<'m>(
             &self, 
-            _method: &'m str,
-            _params: Option<JsonRpcParams>,
+            method: &'m str,
+            params: Option<JsonRpcParams>,
         ) -> Result<JsonValue, HandleMethodError> {
-            unimplemented!()
+            match method {
+                "delay" => {
+                    let params = {
+                        params
+                        .ok_or_else(|| HandleMethodError::InvalidParams {
+                            message: format!("missing params"),
+                            data: None,
+                        })?
+                    };
+                    match params {
+                        JsonRpcParams::Array(mut values) => {
+                            let message_json = {
+                                values
+                                .pop()
+                                .ok_or_else(|| HandleMethodError::InvalidParams {
+                                    message: format!("missing message parameter"),
+                                    data: None,
+                                })?
+                            };
+                            let message = match message_json {
+                                JsonValue::String(message) => message,
+                                _ => return Err(HandleMethodError::InvalidParams {
+                                    message: format!("message parameter must be a string"),
+                                    data: None,
+                                }),
+                            };
+                            let delay_json = {
+                                values
+                                .pop()
+                                .ok_or_else(|| HandleMethodError::InvalidParams {
+                                    message: format!("missing delay parameter"),
+                                    data: None,
+                                })?
+                            };
+                            if !values.is_empty() {
+                                return Err(HandleMethodError::InvalidParams {
+                                    message: format!("too many parameters"),
+                                    data: None,
+                                });
+                            }
+                            let delay = {
+                                delay_json
+                                .as_u64()
+                                .ok_or_else(|| HandleMethodError::InvalidParams {
+                                    message: format!("delay must be a positive integer"),
+                                    data: None,
+                                })?
+                            };
+                            tokio::time::sleep(Duration::from_millis(delay)).await;
+                            Ok(JsonValue::String(message))
+                        },
+                        JsonRpcParams::Object(_) => {
+                            return Err(HandleMethodError::InvalidParams {
+                                message: format!("expected array of parameters"),
+                                data: None,
+                            });
+                        },
+                    }
+                },
+                _ => Err(HandleMethodError::MethodNotFound),
+            }
         }
 
         async fn handle_notification<'m>(
@@ -261,8 +324,9 @@ mod test {
 
     #[tokio::test]
     async fn start_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_addr = listener.local_addr().unwrap();
         let client_stream = {
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let listener_stream = TcpListenerStream::new(listener);
             listener_stream
             .filter_map(|result| async {
@@ -274,176 +338,50 @@ mod test {
                 }
             })
         };
-        let _server = run(client_stream, 1, 1, 1);
-    }
-}
-
-
-
-
-
-
-
-
-
-/*
-fn main() {
-    let connections = {
-        let listener = TcpListener::bind("wow")?;
-        let listener_stream = TcpListenerStream::new(listener);
-        listener_stream
-        .filter_map(|result| match result {
-            Ok(connection) => {
-                let (read_half, write_half) = connection.into_split();
-                Some((read_half, write_half, RpcClient))
-            },
-            Err(err) => log!(error),
-        })
-    };
-
-    let server = json_rpc::run(connections);
-
-    // We have a Stream of (AsyncRead, AsyncWrite)
-
-    // we then take that stream, and turn it into a stream of RpcClient.
-}
-
-struct RpcClient;
-
-#[json_rpc_server]
-impl RpcClient {
-    #[method = "blockchain.scripthash.subscribe"]
-    fn script_hash_subscribe(&self, script_hash: &ScriptHash)
-        -> Result<Something, SomeError>
-    {
-        // do stuff
-    }
-}
-
-// auto-generated
-type SomeFuture = impl Future<Output = ()>;
-impl JsonRpcClient for RpcClient {
-    type HandleRequestFuture = SomeFuture;
-
-    fn handle_request<W>(&self, request: Request, writer: &mut W) -> SomeFuture {
-        match request.method {
-            "blockchain.scripthash.subscribe" => {
-                if request.params.length() != 1 {
-                    return send_invalid_params(writer);
+        let request = "{\"jsonrpc\":\"2.0\",\"method\":\"delay\",\"params\":[1000,\"hello\"],\"id\":45}\n";
+        let make_request = async {
+            let mut response = Vec::new();
+            let mut tcp_stream = TcpStream::connect(local_addr).await.unwrap();
+            tcp_stream.write_all(request.as_bytes()).await.unwrap();
+            tcp_stream.shutdown().await.unwrap();
+            tcp_stream.read_to_end(&mut response).await.unwrap();
+            let value: JsonValue = serde_json::from_slice(&response).unwrap();
+            value
+        }.fuse();
+        let server = run(client_stream, 10, 10, 10);
+        let server_errors = {
+            server
+            .filter_map(|(_client, result)| async { result.err() })
+            .fuse()
+        };
+        pin_mut!(server_errors);
+        pin_mut!(make_request);
+        let response = futures::select! {
+            err = server_errors.select_next_some() => panic!("got an error: {:?}", err),
+            response = make_request => response,
+        };
+        match response {
+            JsonValue::Object(mut map) => {
+                let id = map.remove("id").unwrap();
+                let jsonrpc = map.remove("jsonrpc").unwrap();
+                let result = map.remove("result").unwrap();
+                assert!(map.is_empty());
+                match id {
+                    JsonValue::Number(n) => assert_eq!(n.as_u64().unwrap(), 45),
+                    _ => panic!("unexpected type for id"),
+                };
+                match jsonrpc {
+                    JsonValue::String(s) => assert_eq!(s, "2.0"),
+                    _ => panic!("unexpected value for jsonrpc field"),
                 }
-                let script_hash: &ScriptHash = request.params[0].parse();
-                let result = self.script_hash_subscribe(script_hash);
+                match result {
+                    JsonValue::String(message) => assert_eq!(message, "hello"),
+                    _ => panic!("unexpected result: {:?}", result),
+                }
             },
-            _ => send_invalid_method(writer),
+            _ => panic!("invalid response: {:?}", response),
         }
     }
 }
 
-struct Complete<S>
-where
-    S: Stream<Item = ()>,
-{
-    stream: S,
-}
 
-impl<S> Future for Complete<S>
-where
-    S: Stream<Item = ()>,
-{
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<()> {
-        loop {
-            match self.stream.poll_next(context) {
-                Poll::Ready(Some(())) => (),
-                Poll::Ready(None) => return Poll::Ready,
-                Poll::NotReady => return Poll::NotReady,
-            }
-        }
-    }
-}
-
-#[ext_trait]
-impl<S: Stream> StreamExt for Stream {
-    fn complete(self) -> Complete<S> {
-        Complete { self }
-    }
-}
-
-mod json_rpc {
-    fn run<S, R, W, C>(connections: S)
-        -> impl Stream<io::Error>,
-    where
-        S: Stream<Item = (R, W, C)>,
-        R: AsyncRead,
-        W: AsyncWrite,
-        C: JsonRpcConnection.
-    {
-        connections
-        .map(|connection| tokio::spawn(move || handle_connection(connection)))
-        .buffer_unordered()
-        .filter_map(|result| match result {
-            Ok(()) => None,
-            Err(io_error) => Some(io_error),
-        })
-    }
-
-    async fn handle_connection<R, W, C>(
-        reader: R,
-        writer: W,
-        connection: C,
-    ) {
-        reader
-        .split(b'\n')
-        .filter_map(|line_bytes| {
-            let line = match String::try_from_utf8(line_bytes) {
-                Ok(line) => line,
-                Err(utf8_error) => {
-                    return send_parse_error(..);
-                },
-            };
-            match parse_request(line) {
-                Single(request) => handle_request(request),
-                Batch(requests) => {
-                    let mut sub_futures = FuturesUnordered::with_capacity(requests.len());
-                    for request in requests {
-                        sub_futures.push(handle_request(request));
-                    }
-                    sub_futures
-                    .filter_map(|x| x)
-                    .collect()
-                    .map(|responses| {
-                        // spec says not to return an empty array
-                        if responses.is_empty() {
-                            None
-                        } else {
-                            Some(responses)
-                        }
-                    })
-                },
-            }
-        })
-        .try_buffer_unordered() // is this okay?
-        .try_filter_map(|x| x)
-        .try_then(|response| async {
-            writer.write_all(response.into_json()).await;
-            writer.write('\n').await;
-        })
-        .try_collect()
-    }
-
-    async fn handle_request(request: Request) -> Option<Respose> {
-        let Request { id, method, params } = request;
-        match id {
-            Some(id) => {
-                let response = connection.handle_method(method, params);
-                Some(response)
-            },
-            None => {
-                connection.handle_notification(method, params);
-                None
-            },
-        }
-    }
-}
-*/
