@@ -1,0 +1,16 @@
+[package]
+name = "electrs-json-rpc"
+version = "0.1.0"
+authors = ["Andrew Cann <shum@canndrew.org>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+serde_json = "1.0"
+futures = "0.3.0"
+async-trait = "0.1.50"
+tokio = { version = "=0.2.25", features = ["net", "time", "macros", "io-util", "stream"] }
+pin-utils = "0.1"
+electrs-json-rpc-macro = { path = "./electrs-json-rpc-macro" }
+

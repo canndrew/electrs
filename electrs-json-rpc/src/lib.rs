@@ -1,9 +1,10 @@
+pub use electrs_json_rpc_macro::json_rpc_service;
+
 use std::io;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncBufReadExt, BufReader, AsyncWriteExt};
 use serde_json::{json, Value as JsonValue};
 use async_trait::async_trait;
 use futures::{stream, Stream, StreamExt, TryStreamExt};
-use tokio_stream::wrappers::SplitStream;
 
 mod json_encoded_types;
 use json_encoded_types::*;
@@ -97,7 +98,8 @@ where
     let (reader, mut writer) = tokio::io::split(connection);
     let mut reader = BufReader::new(reader);
     let result = {
-        let lines = SplitStream::new((&mut reader).split(b'\n'));
+        //let lines = SplitStream::new((&mut reader).split(b'\n'));
+        let lines = (&mut reader).split(b'\n');
         let mut response_opts = {
             lines
             .map_ok(|line_bytes| async {
@@ -230,6 +232,10 @@ where
     }
 }
 
+pub trait IntoJsonRpcError {
+    fn into_json_rpc_error(self) -> JsonRpcError;
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -238,11 +244,19 @@ mod test {
     use std::time::Duration;
     use tokio::net::{TcpStream, TcpListener};
     use tokio::io::AsyncReadExt;
-    use tokio_stream::wrappers::TcpListenerStream;
     use futures::{FutureExt, StreamExt};
 
     struct TestService;
 
+    #[json_rpc_service]
+    impl TestService {
+        #[method = "delay"]
+        async fn delay(millis: u32, reply: &str) {
+            reply
+        }
+    }
+
+    /*
     #[async_trait]
     impl JsonRpcService for TestService {
         async fn handle_method<'m>(
@@ -321,13 +335,14 @@ mod test {
             unimplemented!()
         }
     }
+    */
 
     #[tokio::test]
     async fn start_server() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let local_addr = listener.local_addr().unwrap();
         let client_stream = {
-            let listener_stream = TcpListenerStream::new(listener);
+            let listener_stream = listener.incoming();
             listener_stream
             .filter_map(|result| async {
                 match result {
@@ -385,3 +400,18 @@ mod test {
 }
 
 
+impl IntoJsonRpcError for JsonRpcError {
+    fn into_json_rpc_error(self) -> JsonRpcError {
+        self
+    }
+}
+
+struct TestService;
+
+#[json_rpc_service]
+impl TestService {
+    #[method = "delay"]
+    async fn delay(millis: u32, reply: String) -> Result<String, String> {
+        Ok(reply)
+    }
+}
