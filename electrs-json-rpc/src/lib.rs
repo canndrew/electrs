@@ -248,6 +248,13 @@ pub trait IntoJsonRpcError {
     fn into_json_rpc_error(self) -> JsonRpcError;
 }
 
+impl IntoJsonRpcError for JsonRpcError {
+    fn into_json_rpc_error(self) -> JsonRpcError {
+        self
+    }
+}
+
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -412,18 +419,20 @@ mod test {
 }
 
 
-impl IntoJsonRpcError for JsonRpcError {
-    fn into_json_rpc_error(self) -> JsonRpcError {
-        self
-    }
+struct TestService {
+    thing: String,
 }
-
-struct TestService;
 
 #[json_rpc_service]
 impl TestService {
     #[method = "delay"]
-    async fn delay(millis: u32, reply: String) -> Result<String, JsonRpcError> {
-        Ok(reply)
+    async fn delay(&self, millis: u64, reply: String) -> Result<String, JsonRpcError> {
+        use std::time::Duration;
+        tokio::time::delay_for(Duration::from_millis(millis)).await;
+        Ok(format!("{} + {}", self.thing, reply))
+    }
+
+    #[notification = "hello"]
+    async fn wat(&self) {
     }
 }

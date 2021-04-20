@@ -8,6 +8,7 @@ use {
     },
     quote::{quote, quote_spanned},
     proc_macro2::{Span, TokenStream},
+    proc_macro_error::{proc_macro_error, abort},
 };
 
 
@@ -29,17 +30,17 @@ impl Signature {
             match fn_arg {
                 FnArg::Receiver(receiver) => {
                     if receiver.reference.is_none() {
-                        panic!("self must be taken by reference");
+                        abort!(fn_arg.span(), "self must be taken by reference");
                     }
                     if receiver.mutability.is_some() {
-                        panic!("self reference must be immutable");
+                        abort!(fn_arg.span(), "self reference must be immutable");
                     }
                     is_static = false;
                 },
                 FnArg::Typed(pat_type) => {
                     let ident = match &*pat_type.pat {
                         Pat::Ident(pat_ident) => pat_ident.ident.clone(),
-                        _ => panic!("method arguments must be named"),
+                        _ => abort!(pat_type.pat.span(), "cannot match on method arguments"),
                     };
                     let ty = *pat_type.ty.clone();
                     params.push((ident, ty));
@@ -63,19 +64,26 @@ impl Signature {
         .collect()
     }
 
-    fn params_from_json(&self) -> Vec<TokenStream> {
+    fn params_from_json(&self, method_call: bool) -> Vec<TokenStream> {
         let mut params_from_json = Vec::with_capacity(self.params.len());
         for (name, ty) in &self.params {
             let span = ty.span();
+            let on_error = if method_call {
+                quote_spanned! {span=>
+                    Err(HandleMethodError::InvalidParams {
+                        message: format!("parameter {} malformed", stringify!(#name)),
+                        data: Some(JsonValue::String(format!("{}", err))),
+                    })
+                }
+            } else {
+                quote_spanned! {span=>
+                    drop(err)
+                }
+            };
             let param_from_json = quote_spanned! {span=>
                 let #name: #ty = match serde_json::from_value(#name) {
                     Ok(#name) => #name,
-                    Err(err) => {
-                        return Err(HandleMethodError::InvalidParams {
-                            message: format!("parameter {} malformed", stringify!(#name)),
-                            data: Some(JsonValue::String(format!("{}", err))),
-                        });
-                    },
+                    Err(err) => return #on_error,
                 };
             };
             params_from_json.push(param_from_json);
@@ -98,7 +106,7 @@ impl Signature {
         }
     }
 
-    fn call_with_array(&self, self_ty: &Type) -> TokenStream {
+    fn call_with_array(&self, self_ty: &Type, method_call: bool) -> TokenStream {
         let attr_span = self.attr_span;
         let mut params_from_array = Vec::with_capacity(self.params.len());
         for (name, _ty) in &self.params {
@@ -107,7 +115,7 @@ impl Signature {
             };
             params_from_array.push(param_from_array);
         }
-        let params_from_json = self.params_from_json();
+        let params_from_json = self.params_from_json(method_call);
         let call = self.call_syn(self_ty);
         quote_spanned! {attr_span=> {
             let mut __array_values_iter = __array_values.into_iter();
@@ -117,24 +125,31 @@ impl Signature {
         }}
     }
 
-    fn call_with_object(&self, self_ty: &Type) -> TokenStream {
+    fn call_with_object(&self, self_ty: &Type, method_call: bool) -> TokenStream {
         let attr_span = self.attr_span;
         let mut params_from_object = Vec::with_capacity(self.params.len());
         for (name, _ty) in &self.params {
+            let on_error = if method_call {
+                quote_spanned! {attr_span=>
+                    Err(HandleMethodError::InvalidParams {
+                        message: format!("parameter {} missing", stringify!(#name)),
+                        data: None,
+                    })
+                }
+            } else {
+                quote_spanned! {attr_span=>
+                    ()
+                }
+            };
             let param_from_object = quote_spanned! {attr_span=>
                 let #name: JsonValue = match __object_values.remove(stringify!(#name)) {
                     Some(value) => value,
-                    None => {
-                        return Err(HandleMethodError::InvalidParams {
-                            message: format!("parameter {} missing", stringify!(#name)),
-                            data: None,
-                        });
-                    },
+                    None => return #on_error,
                 };
             };
             params_from_object.push(param_from_object);
         }
-        let params_from_json = self.params_from_json();
+        let params_from_json = self.params_from_json(method_call);
         let call = self.call_syn(self_ty);
         quote_spanned! {attr_span=> {
             #(#params_from_object)*
@@ -178,7 +193,7 @@ impl MethodImpl {
     fn call_with_array(&self, self_ty: &Type) -> TokenStream {
         let return_type = &self.return_type;
         let attr_span = self.signature.attr_span;
-        let signature_call_with_array = self.signature.call_with_array(self_ty);
+        let signature_call_with_array = self.signature.call_with_array(self_ty, true);
         let serialize_result = self.serialize_result();
         quote_spanned! {attr_span=> {
             let __method_call_result: #return_type = #signature_call_with_array;
@@ -189,7 +204,7 @@ impl MethodImpl {
     fn call_with_object(&self, self_ty: &Type) -> TokenStream {
         let return_type = &self.return_type;
         let attr_span = self.signature.attr_span;
-        let signature_call_with_object = self.signature.call_with_object(self_ty);
+        let signature_call_with_object = self.signature.call_with_object(self_ty, true);
         let serialize_result = self.serialize_result();
         quote_spanned! {attr_span=> {
             let __method_call_result: #return_type = #signature_call_with_object;
@@ -240,14 +255,19 @@ impl JsonRpcImpl {
                     Meta::NameValue(meta_name_value) => {
                         match meta_name_value.lit {
                             Lit::Str(lit_str) => lit_str.value(),
-                            _ => panic!("method name must be a string"),
+                            _ => {
+                                abort!(
+                                    meta_name_value.lit.span(),
+                                    "method name must be a string",
+                                )
+                            },
                         }
                     },
                     _ => {
-                        panic!("\
-                            Invalid use of attribute. \
-                            Syntax is #[method = \"method_name\"]\
-                            ",
+                        abort!(
+                            attr.span(),
+                            "Invalid use of attribute";
+                            help = "Syntax is #[method = \"method_name\"]",
                         )
                     },
                 };
@@ -266,11 +286,13 @@ impl JsonRpcImpl {
                     signature, return_type, return_span,
                 };
                 match methods_of_arity.insert(arity, method) {
-                    Some(_) => {
-                        panic!(
+                    Some(prev_method) => {
+                        abort!(
+                            attr.span(),
                             "multiple overrides of method {} with arity {}",
                             name,
-                            arity,
+                            arity;
+                            note = prev_method.signature.attr_span => "previous override here",
                         );
                     },
                     None => ()
@@ -280,14 +302,19 @@ impl JsonRpcImpl {
                     Meta::NameValue(meta_name_value) => {
                         match meta_name_value.lit {
                             Lit::Str(lit_str) => lit_str.value(),
-                            _ => panic!("notification name must be a string"),
+                            _ => {
+                                abort!(
+                                    meta_name_value.lit.span(),
+                                    "notification name must be a string",
+                                )
+                            },
                         }
                     },
                     _ => {
-                        panic!("\
-                            Invalid use of attribute. \
-                            Syntax is #[notification = \"notification_name\"]\
-                            ",
+                        abort!(
+                            attr.span(),
+                            "Invalid use of attribute";
+                            help = "Syntax is #[notification = \"notification_name\"]",
                         )
                     },
                 };
@@ -298,11 +325,13 @@ impl JsonRpcImpl {
                 };
                 let signature = Signature::parse_signature(&impl_item_method.sig, attr.span());
                 match notifications_of_arity.insert(arity, signature) {
-                    Some(_) => {
-                        panic!(
+                    Some(prev_notification) => {
+                        abort!(
+                            attr.span(),
                             "multiple overrides of notification {} with arity {}",
                             name,
-                            arity,
+                            arity;
+                            note = prev_notification.attr_span => "previous override here",
                         );
                     },
                     None => ()
@@ -386,8 +415,8 @@ impl JsonRpcImpl {
             let mut calls_with_object = Vec::with_capacity(notifications_of_arity.len());
             for (arity, signature) in notifications_of_arity {
                 let attr_span = signature.attr_span;
-                let signature_call_with_array = signature.call_with_array(&self.self_ty);
-                let signature_call_with_object = signature.call_with_object(&self.self_ty);
+                let signature_call_with_array = signature.call_with_array(&self.self_ty, false);
+                let signature_call_with_object = signature.call_with_object(&self.self_ty, false);
                 let call_with_array = quote_spanned! {attr_span=>
                     #arity => #signature_call_with_array
                 };
@@ -414,7 +443,7 @@ impl JsonRpcImpl {
                             }
                         },
                     }
-                },
+                }
             };
             notification_branches.push(notification_branch);
         }
@@ -453,6 +482,7 @@ impl JsonRpcImpl {
     }
 }
 
+#[proc_macro_error]
 #[proc_macro_attribute]
 pub fn json_rpc_service(
     _attr: proc_macro::TokenStream,
