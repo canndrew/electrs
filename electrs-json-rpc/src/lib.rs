@@ -1,4 +1,4 @@
-pub use electrs_json_rpc_macro::json_rpc_service;
+pub use electrs_json_rpc_macro::{json_rpc_service, json_rpc_client};
 
 use {
     std::io,

@@ -2,7 +2,7 @@ extern crate proc_macro;
 use {
     std::collections::HashMap,
     syn::{
-        Ident, Type, Meta, FnArg, Lit, Pat, parse_quote, ItemImpl, ImplItem,
+        Ident, Type, Meta, FnArg, Lit, Pat, parse_quote, ItemImpl, ImplItem, Receiver,
         ReturnType, Generics, Token, braced, Visibility, TraitItem, token, parse,
         spanned::Spanned,
         parse::{Parse, ParseStream},
@@ -509,7 +509,7 @@ pub fn json_rpc_service(
     tokens.into()
 }
 
-/*
+#[proc_macro_error]
 #[proc_macro]
 pub fn json_rpc_client(
     item: proc_macro::TokenStream,
@@ -522,8 +522,10 @@ pub fn json_rpc_client(
 
 struct ClientSyntax {
     visibility: Visibility,
+    #[allow(unused)] // FIXME
     type_token: Token![type],
     ident: Ident,
+    #[allow(unused)]
     brace_token: token::Brace,
     items: Vec<TraitItem>,
 }
@@ -555,9 +557,9 @@ impl ClientType {
     fn parse_client_syntax(client_syntax: ClientSyntax) -> ClientType {
         let visibility = client_syntax.visibility;
         let name = client_syntax.ident;
-        let notifications = HashMap::new();
+        let mut notifications = HashMap::new();
         for trait_item in client_syntax.items {
-            let trait_item_method = match trait_item {
+            let mut trait_item_method = match trait_item {
                 TraitItem::Method(trait_item_method) => trait_item_method,
                 _ => {
                     abort!(
@@ -604,14 +606,15 @@ impl ClientType {
             let signature = {
                 ClientNotificationSignature::parse_signature(
                     &trait_item_method.sig,
-                    name,
+                    name.clone(),
                 )
             };
             match notifications.insert(method_name, signature) {
                 Some(prev_signature) => {
                     abort!(
                         trait_item_method.span(),
-                        "multiple methods named {}", name,
+                        "multiple methods named {}", name;
+                        note = prev_signature.sig_span => "previous definition here",
                     );
                 },
                 None => (),
@@ -640,12 +643,18 @@ impl ClientType {
                 };
                 params_to_json.push(param_to_json);
             }
+            let receiver = &signature.receiver;
             let notification = quote! {
-                async fn #impl_name(#(#param_sigs,)*) -> Result<(), serde_json::Error> {
-                    let mut __params_array = Vec::with_capacity(#params_len);
-                    #(#params_to_json)*
-                    let __params = JsonRpcParams::Array(__params_array);
-                    self.client.notify(stringify!(#notification_name), __params).await;
+                async fn #impl_name(#receiver, #(#param_sigs,)*) -> Result<(), serde_json::Error> {
+                    let __params = if #params_len > 0 {
+                        let mut __params_array = Vec::with_capacity(#params_len);
+                        #(#params_to_json)*
+                        Some(JsonRpcParams::Array(__params_array))
+                    } else {
+                        None
+                    };
+                    self.client.notify(#notification_name, __params).await;
+                    Ok(())
                 }
             };
             notification_impls.push(notification);
@@ -673,6 +682,8 @@ impl ClientType {
 struct ClientNotificationSignature {
     params: Vec<(Ident, Type)>,
     notification_name: String,
+    receiver: Receiver,
+    sig_span: Span,
 }
 
 impl ClientNotificationSignature {
@@ -680,8 +691,31 @@ impl ClientNotificationSignature {
         sig: &syn::Signature,
         notification_name: String,
     ) -> ClientNotificationSignature {
-        unimplemented!()
+        let mut receiver_opt = None;
+        let mut params = Vec::with_capacity(sig.inputs.len());
+        for fn_arg in &sig.inputs {
+            match fn_arg {
+                FnArg::Receiver(receiver) => {
+                    receiver_opt = Some(receiver.clone());
+                },
+                FnArg::Typed(pat_type) => {
+                    let ident = match &*pat_type.pat {
+                        Pat::Ident(pat_ident) => pat_ident.ident.clone(),
+                        _ => abort!(pat_type.pat.span(), "cannot match on method arguments"),
+                    };
+                    let ty = *pat_type.ty.clone();
+                    params.push((ident, ty));
+                },
+            }
+        }
+        let receiver = match receiver_opt {
+            Some(receiver) => receiver,
+            None => abort!(sig.span(), "expected a self parameter"),
+        };
+        let sig_span = sig.span();
+        ClientNotificationSignature {
+            params, notification_name, receiver, sig_span,
+        }
     }
 }
-*/
 
