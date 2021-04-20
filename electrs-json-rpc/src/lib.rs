@@ -1,10 +1,18 @@
 pub use electrs_json_rpc_macro::json_rpc_service;
 
-use std::io;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncBufReadExt, BufReader, AsyncWriteExt};
-use serde_json::{json, Value as JsonValue};
-use async_trait::async_trait;
-use futures::{stream, Stream, StreamExt, TryStreamExt};
+use {
+    std::io,
+    tokio::{
+        sync::{
+            Mutex, mpsc,
+            mpsc::{Sender, Receiver},
+        },
+        io::{AsyncRead, AsyncWrite, AsyncBufReadExt, BufReader, AsyncWriteExt},
+    },
+    serde_json::{json, Value as JsonValue},
+    async_trait::async_trait,
+    futures::{stream, Stream, StreamExt, TryStreamExt},
+};
 
 mod json_encoded_types;
 use json_encoded_types::*;
@@ -15,6 +23,52 @@ pub mod error_codes {
     pub const METHOD_NOT_FOUND: i16 = -32601;
     pub const INVALID_PARAMS: i16 = -32602;
     pub const INTERNAL_ERROR: i16 = -32603;
+}
+
+pub struct JsonRpcConnection<A> {
+    connection: A,
+    request_receiver: Receiver<JsonRpcRequest>,
+}
+
+impl<A> JsonRpcConnection<A>
+where
+    A: AsyncRead + AsyncWrite + Send + 'static,
+{
+    pub fn from_io_stream(connection: A) -> (JsonRpcConnection<A>, JsonRpcClient) {
+        let (request_sender, request_receiver) = mpsc::channel(1);
+        let json_rpc_connection = JsonRpcConnection {
+            connection,
+            request_receiver,
+        };
+        let json_rpc_client = JsonRpcClient {
+            request_sender: Mutex::new(request_sender),
+        };
+        (json_rpc_connection, json_rpc_client)
+    }
+}
+
+pub struct JsonRpcClient {
+    request_sender: Mutex<Sender<JsonRpcRequest>>,
+}
+
+// TODO: requests and batch requests/notifications
+impl JsonRpcClient {
+    pub async fn notify(
+        &self,
+        method: &str,
+        params: Option<JsonRpcParams>,
+    ) -> bool {
+        let request = JsonRpcRequest {
+            method: method.to_owned(),
+            params,
+            id: None,
+        };
+        let result = {
+            let mut sender = self.request_sender.lock().await;
+            sender.send(request).await
+        };
+        result.is_ok()
+    }
 }
 
 pub enum HandleMethodError {
@@ -81,7 +135,7 @@ pub fn run<A, S, C>(
     max_concurrent_batched_requests_per_client: usize,
 ) -> impl Stream<Item = (A, io::Result<()>)>
 where
-    C: Stream<Item = (A, S)>,
+    C: Stream<Item = (JsonRpcConnection<A>, S)>,
     A: AsyncRead + AsyncWrite + Send + 'static,
     S: JsonRpcService + Send + Sync + 'static,
 {
@@ -98,7 +152,7 @@ where
 }
 
 async fn handle_client<A, S>(
-    connection: A,
+    connection: JsonRpcConnection<A>,
     service: S,
     max_concurrent_requests_per_client: usize,
     max_concurrent_batched_requests_per_client: usize,
@@ -107,30 +161,36 @@ where
     A: AsyncRead + AsyncWrite + Send + 'static,
     S: JsonRpcService + Send + Sync + 'static,
 {
+    let JsonRpcConnection { connection, request_receiver } = connection;
     let (reader, mut writer) = tokio::io::split(connection);
     let mut reader = BufReader::new(reader);
     let result = {
-        //let lines = SplitStream::new((&mut reader).split(b'\n'));
         let lines = (&mut reader).split(b'\n');
-        let mut response_opts = {
+        let response_opts = {
             lines
             .map_ok(|line_bytes| async {
-                Ok(handle_request_line(
+                let response = handle_request_line(
                     line_bytes,
                     &service,
                     max_concurrent_batched_requests_per_client,
-                ).await)
+                ).await;
+                Ok(response.map(JsonRpcMultiRequestOrResponse::Response))
             })
             .try_buffer_unordered(max_concurrent_requests_per_client)
         };
+        let request_opts = {
+            request_receiver
+            .map(|request| Ok(Some(JsonRpcMultiRequestOrResponse::Request(request))))
+        };
+        let mut messages = stream::select(response_opts, request_opts);
         loop {
-            let response = match response_opts.try_next().await {
-                Ok(Some(Some(response))) => response,
+            let message = match messages.try_next().await {
+                Ok(Some(Some(message))) => message,
                 Ok(Some(None)) => continue,
                 Ok(None) => break Ok(()),
                 Err(err) => break Err(err),
             };
-            let json = response.into_json();
+            let json = message.into_json();
             let bytes = serde_json::to_vec(&json).unwrap();
             match writer.write_all(&bytes).await {
                 Ok(_) => (),
@@ -262,7 +322,7 @@ mod test {
     use pin_utils::pin_mut;
     use std::time::Duration;
     use tokio::net::{TcpStream, TcpListener};
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncWriteExt, AsyncReadExt};
     use futures::{FutureExt, StreamExt};
 
     struct TestService;
@@ -270,95 +330,15 @@ mod test {
     #[json_rpc_service]
     impl TestService {
         #[method = "delay"]
-        async fn delay(millis: u32, reply: &str) {
-            reply
+        async fn delay(millis: u64, reply: String) -> Result<String, JsonRpcError> {
+            tokio::time::delay_for(Duration::from_millis(millis)).await;
+            Ok(reply)
         }
     }
-
-    /*
-    #[async_trait]
-    impl JsonRpcService for TestService {
-        async fn handle_method<'m>(
-            &self, 
-            method: &'m str,
-            params: Option<JsonRpcParams>,
-        ) -> Result<JsonValue, HandleMethodError> {
-            match method {
-                "delay" => {
-                    let params = {
-                        params
-                        .ok_or_else(|| HandleMethodError::InvalidParams {
-                            message: format!("missing params"),
-                            data: None,
-                        })?
-                    };
-                    match params {
-                        JsonRpcParams::Array(mut values) => {
-                            let message_json = {
-                                values
-                                .pop()
-                                .ok_or_else(|| HandleMethodError::InvalidParams {
-                                    message: format!("missing message parameter"),
-                                    data: None,
-                                })?
-                            };
-                            let message = match message_json {
-                                JsonValue::String(message) => message,
-                                _ => return Err(HandleMethodError::InvalidParams {
-                                    message: format!("message parameter must be a string"),
-                                    data: None,
-                                }),
-                            };
-                            let delay_json = {
-                                values
-                                .pop()
-                                .ok_or_else(|| HandleMethodError::InvalidParams {
-                                    message: format!("missing delay parameter"),
-                                    data: None,
-                                })?
-                            };
-                            if !values.is_empty() {
-                                return Err(HandleMethodError::InvalidParams {
-                                    message: format!("too many parameters"),
-                                    data: None,
-                                });
-                            }
-                            let delay = {
-                                delay_json
-                                .as_u64()
-                                .ok_or_else(|| HandleMethodError::InvalidParams {
-                                    message: format!("delay must be a positive integer"),
-                                    data: None,
-                                })?
-                            };
-                            tokio::time::sleep(Duration::from_millis(delay)).await;
-                            Ok(JsonValue::String(message))
-                        },
-                        JsonRpcParams::Object(_) => {
-                            return Err(HandleMethodError::InvalidParams {
-                                message: format!("expected array of parameters"),
-                                data: None,
-                            });
-                        },
-                    }
-                },
-                _ => Err(HandleMethodError::MethodNotFound),
-            }
-        }
-
-        async fn handle_notification<'m>(
-            &self,
-            _method: &'m str,
-            _params: Option<JsonRpcParams>,
-        ) {
-            unimplemented!()
-        }
-    }
-    */
 
     #[tokio::test]
     async fn start_server() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let local_addr = listener.local_addr().unwrap();
         let client_stream = {
             let listener_stream = listener.incoming();
@@ -366,7 +346,8 @@ mod test {
             .filter_map(|result| async {
                 match result {
                     Ok(client) => {
-                        Some((client, TestService))
+                        let (connection, _notifier) = JsonRpcConnection::from_io_stream(client);
+                        Some((connection, TestService))
                     },
                     Err(err) => panic!("tcp accept failed: {}", err),
                 }
@@ -377,7 +358,7 @@ mod test {
             let mut response = Vec::new();
             let mut tcp_stream = TcpStream::connect(local_addr).await.unwrap();
             tcp_stream.write_all(request.as_bytes()).await.unwrap();
-            tcp_stream.shutdown().await.unwrap();
+            AsyncWriteExt::shutdown(&mut tcp_stream).await.unwrap();
             tcp_stream.read_to_end(&mut response).await.unwrap();
             let value: JsonValue = serde_json::from_slice(&response).unwrap();
             value
@@ -415,24 +396,5 @@ mod test {
             },
             _ => panic!("invalid response: {:?}", response),
         }
-    }
-}
-
-
-struct TestService {
-    thing: String,
-}
-
-#[json_rpc_service]
-impl TestService {
-    #[method = "delay"]
-    async fn delay(&self, millis: u64, reply: String) -> Result<String, JsonRpcError> {
-        use std::time::Duration;
-        tokio::time::delay_for(Duration::from_millis(millis)).await;
-        Ok(format!("{} + {}", self.thing, reply))
-    }
-
-    #[notification = "hello"]
-    async fn wat(&self) {
     }
 }

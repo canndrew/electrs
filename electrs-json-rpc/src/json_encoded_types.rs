@@ -101,6 +101,13 @@ pub enum JsonRpcParams {
 }
 
 impl JsonRpcParams {
+    pub fn into_json(self) -> JsonValue {
+        match self {
+            JsonRpcParams::Array(array) => JsonValue::Array(array),
+            JsonRpcParams::Object(map) => JsonValue::Object(map),
+        }
+    }
+
     pub fn from_json(json: JsonValue) -> Result<JsonRpcParams, String> {
         match json {
             JsonValue::Array(array) => Ok(JsonRpcParams::Array(array)),
@@ -117,6 +124,31 @@ pub struct JsonRpcRequest {
 }
 
 impl JsonRpcRequest {
+    pub fn into_json(self) -> JsonValue {
+        match (self.params, self.id) {
+            (None, None) => json! {{
+                "jsonrpc": "2.0",
+                "method": self.method,
+            }},
+            (None, Some(id)) => json! {{
+                "jsonrpc": "2.0",
+                "method": self.method,
+                "id": id.into_json(),
+            }},
+            (Some(params), None) => json! {{
+                "jsonrpc": "2.0",
+                "method": self.method,
+                "params": params.into_json(),
+            }},
+            (Some(params), Some(id)) => json! {{
+                "jsonrpc": "2.0",
+                "method": self.method,
+                "params": params.into_json(),
+                "id": id.into_json(),
+            }},
+        }
+    }
+
     pub fn from_json(json: JsonValue) -> Result<JsonRpcRequest, (Option<JsonRpcId>, String)> {
         match json {
             JsonValue::Object(mut map) => {
@@ -171,6 +203,24 @@ impl JsonRpcRequest {
                 Ok(JsonRpcRequest { id, method, params })
             },
             _ => Err((None, format!("request must be an object"))),
+        }
+    }
+}
+
+pub enum JsonRpcMultiRequestOrResponse {
+    Request(JsonRpcRequest),
+    Response(JsonRpcMultiResponse),
+}
+
+impl JsonRpcMultiRequestOrResponse {
+    pub fn into_json(self) -> JsonValue {
+        match self {
+            JsonRpcMultiRequestOrResponse::Request(request) => {
+                request.into_json()
+            },
+            JsonRpcMultiRequestOrResponse::Response(response) => {
+                response.into_json()
+            },
         }
     }
 }

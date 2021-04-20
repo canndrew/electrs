@@ -3,8 +3,9 @@ use {
     std::collections::HashMap,
     syn::{
         Ident, Type, Meta, FnArg, Lit, Pat, parse_quote, ItemImpl, ImplItem,
-        ReturnType, Generics,
+        ReturnType, Generics, Token, braced, Visibility, TraitItem, token, parse,
         spanned::Spanned,
+        parse::{Parse, ParseStream},
     },
     quote::{quote, quote_spanned},
     proc_macro2::{Span, TokenStream},
@@ -16,6 +17,7 @@ struct Signature {
     params: Vec<(Ident, Type)>,
     method_impl_name: Ident,
     is_static: bool,
+    is_async: bool,
     attr_span: Span,
 }
 
@@ -24,6 +26,7 @@ impl Signature {
         sig: &syn::Signature,
         attr_span: Span,
     ) -> Signature {
+        let is_async = sig.asyncness.is_some();
         let mut is_static = true;
         let mut params = Vec::with_capacity(sig.inputs.len());
         for fn_arg in sig.inputs.iter() {
@@ -52,6 +55,7 @@ impl Signature {
             params,
             method_impl_name,
             is_static,
+            is_async,
             attr_span,
         }
     }
@@ -95,14 +99,21 @@ impl Signature {
         let attr_span = self.attr_span;
         let param_names = self.param_names();
         let method_impl_name = &self.method_impl_name;
-        if self.is_static {
+        let call = if self.is_static {
             quote_spanned! {attr_span=>
-                <#self_ty>::#method_impl_name(#(#param_names,)*).await
+                <#self_ty>::#method_impl_name(#(#param_names,)*)
             }
         } else {
             quote_spanned! {attr_span=>
-                self.#method_impl_name(#(#param_names,)*).await
+                self.#method_impl_name(#(#param_names,)*)
             }
+        };
+        if self.is_async {
+            quote_spanned! {attr_span=>
+                #call.await
+            }
+        } else {
+            call
         }
     }
 
@@ -497,4 +508,180 @@ pub fn json_rpc_service(
     };
     tokens.into()
 }
+
+/*
+#[proc_macro]
+pub fn json_rpc_client(
+    item: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    let client_syntax = syn::parse_macro_input!(item as ClientSyntax);
+    let client_type = ClientType::parse_client_syntax(client_syntax);
+    let tokens = client_type.into_syn();
+    tokens.into()
+}
+
+struct ClientSyntax {
+    visibility: Visibility,
+    type_token: Token![type],
+    ident: Ident,
+    brace_token: token::Brace,
+    items: Vec<TraitItem>,
+}
+
+impl Parse for ClientSyntax {
+    fn parse(input: ParseStream) -> Result<ClientSyntax, parse::Error> {
+        let visibility = input.parse()?;
+        let type_token = input.parse()?;
+        let ident = input.parse()?;
+        let content;
+        let brace_token = braced!(content in input);
+        let mut items = Vec::new();
+        while !content.is_empty() {
+            items.push(content.parse()?);
+        }
+        Ok(ClientSyntax {
+            visibility, type_token, ident, brace_token, items,
+        })
+    }
+}
+
+struct ClientType {
+    visibility: Visibility,
+    name: Ident,
+    notifications: HashMap<Ident, ClientNotificationSignature>,
+}
+
+impl ClientType {
+    fn parse_client_syntax(client_syntax: ClientSyntax) -> ClientType {
+        let visibility = client_syntax.visibility;
+        let name = client_syntax.ident;
+        let notifications = HashMap::new();
+        for trait_item in client_syntax.items {
+            let trait_item_method = match trait_item {
+                TraitItem::Method(trait_item_method) => trait_item_method,
+                _ => {
+                    abort!(
+                        trait_item.span(),
+                        "only methods are allowed in json_rpc_client! blocks",
+                    )
+                },
+            };
+            let attr = {
+                let index_opt = trait_item_method.attrs.iter().position(|attr| {
+                    attr.path.is_ident("notification")
+                });
+                match index_opt {
+                    Some(index) => trait_item_method.attrs.remove(index),
+                    None => {
+                        abort!(
+                            trait_item_method.span(),
+                            "missing #[notification] attribute",
+                        )
+                    },
+                }
+            };
+            let name = match attr.parse_meta().unwrap() {
+                Meta::NameValue(meta_name_value) => {
+                    match meta_name_value.lit {
+                        Lit::Str(lit_str) => lit_str.value(),
+                        _ => {
+                            abort!(
+                                meta_name_value.lit.span(),
+                                "notification name must be a string",
+                            )
+                        },
+                    }
+                },
+                _ => {
+                    abort!(
+                        attr.span(),
+                        "Invalid use of attribute";
+                        help = "Syntax is #[notification = \"method_name\"]",
+                    )
+                },
+            };
+            let method_name = trait_item_method.sig.ident.clone();
+            let signature = {
+                ClientNotificationSignature::parse_signature(
+                    &trait_item_method.sig,
+                    name,
+                )
+            };
+            match notifications.insert(method_name, signature) {
+                Some(prev_signature) => {
+                    abort!(
+                        trait_item_method.span(),
+                        "multiple methods named {}", name,
+                    );
+                },
+                None => (),
+            }
+        }
+        ClientType { visibility, name, notifications }
+    }
+
+    fn into_syn(&self) -> TokenStream {
+        let visibility = &self.visibility;
+        let name = &self.name;
+        let mut notification_impls = Vec::with_capacity(self.notifications.len());
+        for (impl_name, signature) in &self.notifications {
+            let notification_name = &signature.notification_name;
+            let params_len = signature.params.len();
+            let mut param_sigs = Vec::with_capacity(params_len);
+            let mut params_to_json = Vec::with_capacity(params_len);
+            for (param_name, param_type) in &signature.params {
+                let param_sig = quote! {
+                    #param_name: #param_type
+                };
+                param_sigs.push(param_sig);
+                let param_to_json = quote! {
+                    let #param_name = serde_json::to_value(#param_name)?;
+                    __params_array.push(#param_name);
+                };
+                params_to_json.push(param_to_json);
+            }
+            let notification = quote! {
+                async fn #impl_name(#(#param_sigs,)*) -> Result<(), serde_json::Error> {
+                    let mut __params_array = Vec::with_capacity(#params_len);
+                    #(#params_to_json)*
+                    let __params = JsonRpcParams::Array(__params_array);
+                    self.client.notify(stringify!(#notification_name), __params).await;
+                }
+            };
+            notification_impls.push(notification);
+        }
+        quote! {
+            #visibility struct #name {
+                client: JsonRpcClient,
+            }
+
+            impl #name {
+                pub fn from_inner(client: JsonRpcClient) -> #name {
+                    #name { client }
+                }
+
+                pub fn into_inner(self) -> JsonRpcClient {
+                    self.client
+                }
+
+                #(#notification_impls)*
+            }
+        }
+    }
+}
+
+struct ClientNotificationSignature {
+    params: Vec<(Ident, Type)>,
+    notification_name: String,
+}
+
+impl ClientNotificationSignature {
+    fn parse_signature(
+        sig: &syn::Signature,
+        notification_name: String,
+    ) -> ClientNotificationSignature {
+        unimplemented!()
+    }
+}
+*/
 
