@@ -73,7 +73,7 @@ impl Signature {
                     Err(err) => {
                         return Err(HandleMethodError::InvalidParams {
                             message: format!("parameter {} malformed", stringify!(#name)),
-                            data: JsonValue::String(format!("{}", err)),
+                            data: Some(JsonValue::String(format!("{}", err))),
                         });
                     },
                 };
@@ -103,14 +103,14 @@ impl Signature {
         let mut params_from_array = Vec::with_capacity(self.params.len());
         for (name, _ty) in &self.params {
             let param_from_array = quote_spanned! {attr_span=>
-                let #name: JsonValue = values.next().unwrap();
+                let #name: JsonValue = __array_values_iter.next().unwrap();
             };
             params_from_array.push(param_from_array);
         }
         let params_from_json = self.params_from_json();
         let call = self.call_syn(self_ty);
         quote_spanned! {attr_span=> {
-            let mut values = values.into_iter();
+            let mut __array_values_iter = __array_values.into_iter();
             #(#params_from_array)*
             #(#params_from_json)*
             #call
@@ -122,7 +122,7 @@ impl Signature {
         let mut params_from_object = Vec::with_capacity(self.params.len());
         for (name, _ty) in &self.params {
             let param_from_object = quote_spanned! {attr_span=>
-                let #name: JsonValue = match map.take(stringify!(#name)) {
+                let #name: JsonValue = match __object_values.remove(stringify!(#name)) {
                     Some(value) => value,
                     None => {
                         return Err(HandleMethodError::InvalidParams {
@@ -152,53 +152,58 @@ struct MethodImpl {
 
 impl MethodImpl {
     fn serialize_result(&self) -> TokenStream {
-        let return_type = &self.return_type;
         let return_span = self.return_span;
         quote_spanned! {return_span=>
-            match result {
+            match __method_call_result {
                 Ok(value) => {
-                    let value: #return_type = match serde_json::to_value(value) {
-                        Ok(value) => value,
+                    match serde_json::to_value(value) {
+                        Ok(value) => Ok(value),
                         Err(err) => {
                             return Err(HandleMethodError::InternalError {
                                 message: format!("json serialization of return value failed"),
-                                data: JsonValue::String(format!("{}", err)),
+                                data: Some(JsonValue::String(format!("{}", err))),
                             });
                         },
-                    };
-                    Ok(value)
+                    }
                 },
-                Err(err) => Err(IntoJsonRpcError::into_json_rpc_error(err)),
+                Err(err) => {
+                    Err(HandleMethodError::ApplicationError(
+                        IntoJsonRpcError::into_json_rpc_error(err),
+                    ))
+                },
             }
         }
     }
 
     fn call_with_array(&self, self_ty: &Type) -> TokenStream {
+        let return_type = &self.return_type;
         let attr_span = self.signature.attr_span;
         let signature_call_with_array = self.signature.call_with_array(self_ty);
         let serialize_result = self.serialize_result();
         quote_spanned! {attr_span=> {
-            let result = #signature_call_with_array;
+            let __method_call_result: #return_type = #signature_call_with_array;
             #serialize_result
         }}
     }
 
     fn call_with_object(&self, self_ty: &Type) -> TokenStream {
+        let return_type = &self.return_type;
         let attr_span = self.signature.attr_span;
         let signature_call_with_object = self.signature.call_with_object(self_ty);
         let serialize_result = self.serialize_result();
         quote_spanned! {attr_span=> {
-            let result = #signature_call_with_object;
+            let __method_call_result: #return_type = #signature_call_with_object;
             #serialize_result
         }}
     }
 
     fn call_syn(&self, self_ty: &Type) -> TokenStream {
+        let return_type = &self.return_type;
         let attr_span = self.signature.attr_span;
         let signature_call_syn = self.signature.call_syn(self_ty);
         let serialize_result = self.serialize_result();
         quote_spanned! {attr_span=> {
-            let result = #signature_call_syn;
+            let __method_call_result: #return_type = #signature_call_syn;
             #serialize_result
         }}
     }
@@ -342,10 +347,10 @@ impl JsonRpcImpl {
             };
             let method_branch = quote_spanned! {top_attr_span=>
                 #name => {
-                    match params {
+                    match __params {
                         None => #no_params,
-                        Some(JsonRpcParams::Array(values)) => {
-                            match values.len() {
+                        Some(JsonRpcParams::Array(__array_values)) => {
+                            match __array_values.len() {
                                 #(#calls_with_array,)*
                                 _ => {
                                     return Err(HandleMethodError::InvalidParams {
@@ -355,8 +360,8 @@ impl JsonRpcImpl {
                                 },
                             }
                         },
-                        Some(JsonRpcParams::Object(map)) => {
-                            match map.len() {
+                        Some(JsonRpcParams::Object(mut __object_values)) => {
+                            match __object_values.len() {
                                 #(#calls_with_object,)*
                                 _ => {
                                     return Err(HandleMethodError::InvalidParams {
@@ -394,16 +399,16 @@ impl JsonRpcImpl {
             };
             let notification_branch = quote_spanned! {top_attr_span=>
                 #name => {
-                    match params {
+                    match __params {
                         None => #no_params,
-                        Some(JsonRpcParams::Array(values)) => {
-                            match values.len() {
+                        Some(JsonRpcParams::Array(__array_values)) => {
+                            match __array_values.len() {
                                 #(#calls_with_array,)*
                                 _ => (),
                             }
                         },
-                        Some(JsonRpcParams::Object(map)) => {
-                            match map.len() {
+                        Some(JsonRpcParams::Object(mut __object_values)) => {
+                            match __object_values.len() {
                                 #(#calls_with_object,)*
                                 _ => (),
                             }
@@ -422,12 +427,12 @@ impl JsonRpcImpl {
             {
                 async fn handle_method<'s, 'm>(
                     &'s self,
-                    method: &'m str,
-                    params: Option<JsonRpcParams>,
+                    __method: &'m str,
+                    __params: Option<JsonRpcParams>,
                 )
                     -> Result<JsonValue, HandleMethodError>
                 {
-                    match method {
+                    match __method {
                         #(#method_branches,)*
                         _ => Err(HandleMethodError::MethodNotFound),
                     }
@@ -435,10 +440,10 @@ impl JsonRpcImpl {
 
                 async fn handle_notification<'s, 'm>(
                     &'s self,
-                    method: &'m str,
-                    params: Option<JsonRpcParams>,
+                    __method: &'m str,
+                    __params: Option<JsonRpcParams>,
                 ) {
-                    match method {
+                    match __method {
                         #(#notification_branches,)*
                         _ => (),
                     }

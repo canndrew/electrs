@@ -14,11 +14,16 @@ pub mod error_codes {
     pub const INVALID_REQUEST: i16 = -32600;
     pub const METHOD_NOT_FOUND: i16 = -32601;
     pub const INVALID_PARAMS: i16 = -32602;
+    pub const INTERNAL_ERROR: i16 = -32603;
 }
 
 pub enum HandleMethodError {
     MethodNotFound,
     InvalidParams {
+        message: String,
+        data: Option<JsonValue>,
+    },
+    InternalError {
         message: String,
         data: Option<JsonValue>,
     },
@@ -42,6 +47,13 @@ impl HandleMethodError {
                     data,
                 }
             },
+            HandleMethodError::InternalError { message, data } => {
+                JsonRpcError {
+                    code: error_codes::INTERNAL_ERROR,
+                    message,
+                    data,
+                }
+            },
             HandleMethodError::ApplicationError(err) => err,
         }
     }
@@ -49,14 +61,14 @@ impl HandleMethodError {
 
 #[async_trait]
 pub trait JsonRpcService {
-    async fn handle_method<'m>(
-        &self,
+    async fn handle_method<'s, 'm>(
+        &'s self,
         method: &'m str,
         params: Option<JsonRpcParams>,
     ) -> Result<JsonValue, HandleMethodError>;
 
-    async fn handle_notification<'m>(
-        &self,
+    async fn handle_notification<'s, 'm>(
+        &'s self,
         method: &'m str,
         params: Option<JsonRpcParams>,
     );
@@ -411,7 +423,7 @@ struct TestService;
 #[json_rpc_service]
 impl TestService {
     #[method = "delay"]
-    async fn delay(millis: u32, reply: String) -> Result<String, String> {
+    async fn delay(millis: u32, reply: String) -> Result<String, JsonRpcError> {
         Ok(reply)
     }
 }
