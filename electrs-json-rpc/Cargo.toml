@@ -13,4 +13,9 @@ async-trait = "0.1.50"
 tokio = { version = "=0.2.25", features = ["net", "time", "macros", "io-util", "stream", "sync"] }
 pin-utils = "0.1"
 electrs-json-rpc-macro = { path = "./electrs-json-rpc-macro" }
+thiserror = "1.0.24"
+
+[dev-dependencies]
+rand = "0.8.3"
+rand_distr = "0.4.0"
 

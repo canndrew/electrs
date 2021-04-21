@@ -1,7 +1,10 @@
 pub use electrs_json_rpc_macro::{json_rpc_service, json_rpc_client};
 
 use {
-    std::io,
+    std::{
+        io,
+        convert::{TryFrom, TryInto},
+    },
     tokio::{
         sync::{
             Mutex, mpsc,
@@ -9,13 +12,14 @@ use {
         },
         io::{AsyncRead, AsyncWrite, AsyncBufReadExt, BufReader, AsyncWriteExt},
     },
+    thiserror::Error,
     serde_json::{json, Value as JsonValue},
     async_trait::async_trait,
     futures::{stream, Stream, StreamExt, TryStreamExt},
 };
 
-mod json_encoded_types;
-use json_encoded_types::*;
+pub mod json_types;
+use json_types::*;
 
 pub mod error_codes {
     pub const PARSE_ERROR: i16 = -32700;
@@ -165,22 +169,22 @@ where
     let (reader, mut writer) = tokio::io::split(connection);
     let mut reader = BufReader::new(reader);
     let result = {
-        let lines = (&mut reader).split(b'\n');
+        let lines = (&mut reader).lines();
         let response_opts = {
             lines
-            .map_ok(|line_bytes| async {
+            .map_ok(|line| async {
                 let response = handle_request_line(
-                    line_bytes,
+                    line,
                     &service,
                     max_concurrent_batched_requests_per_client,
                 ).await;
-                Ok(response.map(JsonRpcMultiRequestOrResponse::Response))
+                Ok(response.map(JsonRpcMessage::Response))
             })
             .try_buffer_unordered(max_concurrent_requests_per_client)
         };
         let request_opts = {
             request_receiver
-            .map(|request| Ok(Some(JsonRpcMultiRequestOrResponse::Request(request))))
+            .map(|request| Ok(Some(JsonRpcMessage::Request(request))))
         };
         let mut messages = stream::select(response_opts, request_opts);
         loop {
@@ -190,8 +194,9 @@ where
                 Ok(None) => break Ok(()),
                 Err(err) => break Err(err),
             };
-            let json = message.into_json();
-            let bytes = serde_json::to_vec(&json).unwrap();
+            let json = JsonValue::from(message);
+            let mut bytes = serde_json::to_vec(&json).unwrap();
+            bytes.push(b'\n');
             match writer.write_all(&bytes).await {
                 Ok(_) => (),
                 Err(err) => break Err(err),
@@ -203,14 +208,14 @@ where
 }
 
 async fn handle_request_line<S>(
-    line_bytes: Vec<u8>,
+    line: String,
     service: &S,
     max_concurrent_batched_requests_per_client: usize,
-) -> Option<JsonRpcMultiResponse>
+) -> Option<JsonRpcResponses>
 where
     S: JsonRpcService + Send + 'static,
 {
-    let multi_request_json = match serde_json::from_slice(&line_bytes) {
+    let multi_request_json = match serde_json::from_str(&line) {
         Ok(multi_request_json) => multi_request_json,
         Err(err) => {
             let response = JsonRpcResponse {
@@ -221,14 +226,14 @@ where
                     data: None,
                 }),
             };
-            let responses = JsonRpcMultiResponse::Single(response);
+            let responses = JsonRpcResponses::Single(response);
             return Some(responses);
         },
     };
     match multi_request_json {
         JsonValue::Object(_) => {
             let response_opt = handle_request(multi_request_json, service).await;
-            response_opt.map(JsonRpcMultiResponse::Single)
+            response_opt.map(JsonRpcResponses::Single)
         },
         JsonValue::Array(requests) => {
             let responses = {
@@ -242,7 +247,7 @@ where
             if responses.is_empty() {
                 None
             } else {
-                Some(JsonRpcMultiResponse::Batch(responses))
+                Some(JsonRpcResponses::Batch(responses))
             }
         },
         _ => {
@@ -254,7 +259,7 @@ where
                     data: None,
                 }),
             };
-            let responses = JsonRpcMultiResponse::Single(response);
+            let responses = JsonRpcResponses::Single(response);
             Some(responses)
         },
     }
@@ -267,21 +272,10 @@ async fn handle_request<S>(
 where
     S: JsonRpcService + Send + 'static,
 {
-    let request = match JsonRpcRequest::from_json(request_json) {
+    let request = match JsonRpcRequest::try_from(request_json) {
         Ok(request) => request,
-        Err((id_opt, message)) => {
-            let id = match id_opt {
-                Some(id) => id,
-                None => JsonRpcId::Null,
-            };
-            let response = JsonRpcResponse {
-                id,
-                result: Err(JsonRpcError {
-                    code: error_codes::INVALID_REQUEST,
-                    message,
-                    data: None,
-                }),
-            };
+        Err(request_from_json_error) => {
+            let response = request_from_json_error.into_error_response();
             return Some(response);
         },
     };
@@ -319,11 +313,18 @@ impl IntoJsonRpcError for JsonRpcError {
 mod test {
     use super::*;
 
-    use pin_utils::pin_mut;
-    use std::time::Duration;
-    use tokio::net::{TcpStream, TcpListener};
-    use tokio::io::{AsyncWriteExt, AsyncReadExt};
-    use futures::{FutureExt, StreamExt};
+    use {
+        std::{
+            collections::HashMap,
+            time::Duration,
+        },
+        rand::Rng,
+        tokio::{
+            net::{TcpStream, TcpListener},
+            io::AsyncWriteExt,
+        },
+        futures::{StreamExt, stream::FuturesUnordered},
+    };
 
     struct TestService;
 
@@ -338,63 +339,110 @@ mod test {
 
     #[tokio::test]
     async fn start_server() {
+        const NUM_CLIENTS: usize = 1000;
+        const MAX_REQUESTS_PER_CLIENT: usize = 100;
+
         let mut listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let local_addr = listener.local_addr().unwrap();
-        let client_stream = {
-            let listener_stream = listener.incoming();
-            listener_stream
-            .filter_map(|result| async {
-                match result {
-                    Ok(client) => {
-                        let (connection, _notifier) = JsonRpcConnection::from_io_stream(client);
-                        Some((connection, TestService))
-                    },
-                    Err(err) => panic!("tcp accept failed: {}", err),
-                }
-            })
-        };
-        let request = "{\"jsonrpc\":\"2.0\",\"method\":\"delay\",\"params\":[1000,\"hello\"],\"id\":45}\n";
-        let make_request = async {
-            let mut response = Vec::new();
-            let mut tcp_stream = TcpStream::connect(local_addr).await.unwrap();
-            tcp_stream.write_all(request.as_bytes()).await.unwrap();
-            AsyncWriteExt::shutdown(&mut tcp_stream).await.unwrap();
-            tcp_stream.read_to_end(&mut response).await.unwrap();
-            let value: JsonValue = serde_json::from_slice(&response).unwrap();
-            value
-        }.fuse();
-        let server = run(client_stream, 10, 10, 10);
-        let server_errors = {
-            server
+        let server = {
+            let client_stream = {
+                let listener_stream = listener.incoming();
+                listener_stream
+                .take(NUM_CLIENTS)
+                .filter_map(|result| async {
+                    match result {
+                        Ok(client) => {
+                            let (connection, _notifier) = JsonRpcConnection::from_io_stream(client);
+                            Some((connection, TestService))
+                        },
+                        Err(err) => panic!("tcp accept failed: {}", err),
+                    }
+                })
+            };
+
+            run(client_stream, NUM_CLIENTS, MAX_REQUESTS_PER_CLIENT, MAX_REQUESTS_PER_CLIENT)
             .filter_map(|(_client, result)| async { result.err() })
-            .fuse()
+            .map(|err| {
+                panic!("got an error: {}", err)
+            })
+            .collect()
         };
-        pin_mut!(server_errors);
-        pin_mut!(make_request);
-        let response = futures::select! {
-            err = server_errors.select_next_some() => panic!("got an error: {:?}", err),
-            response = make_request => response,
-        };
-        match response {
-            JsonValue::Object(mut map) => {
-                let id = map.remove("id").unwrap();
-                let jsonrpc = map.remove("jsonrpc").unwrap();
-                let result = map.remove("result").unwrap();
-                assert!(map.is_empty());
-                match id {
-                    JsonValue::Number(n) => assert_eq!(n.as_u64().unwrap(), 45),
-                    _ => panic!("unexpected type for id"),
+
+        let client_num = std::sync::atomic::AtomicUsize::new(0);
+        let clients = FuturesUnordered::new();
+        for _ in 0..NUM_CLIENTS {
+            let client = async {
+                let mut tcp_stream = TcpStream::connect(local_addr).await.unwrap();
+
+                let mut rng = rand::thread_rng();
+                let num_requests = rng.gen::<usize>() % MAX_REQUESTS_PER_CLIENT;
+                let mut requests = HashMap::new();
+                let mut buffer = Vec::new();
+                for _ in 0..num_requests {
+                    let delay = (rng.sample::<f64, _>(rand_distr::Exp1) * 1000.0f64) as u64;
+                    let msg = format!("{}", rng.gen::<f64>());
+                    let id = loop {
+                        let id = rng.gen();
+                        if requests.contains_key(&id) {
+                            continue;
+                        }
+                        requests.insert(id, msg.clone());
+                        break id;
+                    };
+                    let request = {
+                        let request = JsonRpcRequest {
+                            method: format!("delay"),
+                            params: {
+                                Some(JsonRpcParams::Array(vec![
+                                    JsonValue::Number(delay.into()),
+                                    JsonValue::String(msg),
+                                ]))
+                            },
+                            id: Some(JsonRpcId::Number(id)),
+                        };
+                        JsonValue::from(request)
+                    };
+                    serde_json::to_writer(&mut buffer, &request).unwrap();
+                    buffer.push(b'\n');
+                    tcp_stream.write_all(buffer.as_slice()).await.unwrap();
+                    buffer.clear();
+                }
+
+                AsyncWriteExt::shutdown(&mut tcp_stream).await.unwrap();
+                let tcp_stream_reader = BufReader::new(tcp_stream);
+                let mut lines = tcp_stream_reader.lines();
+                loop {
+                    let line = match lines.next().await {
+                        Some(line) => line.unwrap(),
+                        None => break,
+                    };
+                    let response_json: JsonValue = {
+                        serde_json::from_slice(line.as_bytes()).unwrap()
+                    };
+                    let response = JsonRpcResponse::try_from(response_json).unwrap();
+                    let id = match response.id {
+                        JsonRpcId::Number(id) => id,
+                        _ => panic!("invalid id"),
+                    };
+                    let msg = match response.result {
+                        Ok(JsonValue::String(msg)) => msg,
+                        _ => panic!("invalid response"),
+                    };
+                    match requests.remove(&id) {
+                        Some(original_msg) => assert_eq!(original_msg, msg),
+                        None => panic!("unknown id"),
+                    };
+                }
+                assert!(requests.is_empty());
+                let clients_finished = {
+                    1 + client_num.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                 };
-                match jsonrpc {
-                    JsonValue::String(s) => assert_eq!(s, "2.0"),
-                    _ => panic!("unexpected value for jsonrpc field"),
-                }
-                match result {
-                    JsonValue::String(message) => assert_eq!(message, "hello"),
-                    _ => panic!("unexpected result: {:?}", result),
-                }
-            },
-            _ => panic!("invalid response: {:?}", response),
+                println!("finished {}/{} clients", clients_finished, NUM_CLIENTS);
+            };
+            clients.push(client);
         }
+        let clients = clients.for_each(|()| async { () });
+
+        let ((), ()) = futures::join!(server, clients);
     }
 }
