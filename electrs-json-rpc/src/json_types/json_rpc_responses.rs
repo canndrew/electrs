@@ -22,4 +22,45 @@ impl From<JsonRpcResponses> for JsonValue {
     }
 }
 
+#[derive(Debug, Error)]
+pub enum JsonRpcResponsesFromJsonError {
+    #[error("malformed response: {}", source)]
+    MalformedResponse {
+        source: JsonRpcResponseFromJsonError,
+    },
+    #[error("empty batch array")]
+    EmptyBatchArray,
+    #[error("expected a response json object or json array of responses")]
+    InvalidJsonType,
+}
+
+impl TryFrom<JsonValue> for JsonRpcResponses {
+    type Error = JsonRpcResponsesFromJsonError;
+
+    fn try_from(json: JsonValue) -> Result<JsonRpcResponses, JsonRpcResponsesFromJsonError> {
+        match json {
+            JsonValue::Object(..) => match JsonRpcResponse::try_from(json) {
+                Ok(response) => Ok(JsonRpcResponses::Single(response)),
+                Err(source) => Err(JsonRpcResponsesFromJsonError::MalformedResponse { source }),
+            },
+            JsonValue::Array(responses_json) => {
+                if responses_json.is_empty() {
+                    return Err(JsonRpcResponsesFromJsonError::EmptyBatchArray);
+                }
+                let mut responses = Vec::with_capacity(responses_json.len());
+                for response_json in responses_json {
+                    let response = match JsonRpcResponse::try_from(response_json) {
+                        Ok(response) => response,
+                        Err(source) => {
+                            return Err(JsonRpcResponsesFromJsonError::MalformedResponse { source });
+                        },
+                    };
+                    responses.push(response);
+                }
+                Ok(JsonRpcResponses::Batch(responses))
+            },
+            _ => Err(JsonRpcResponsesFromJsonError::InvalidJsonType),
+        }
+    }
+}
 

@@ -31,7 +31,7 @@ pub mod error_codes {
 
 pub struct JsonRpcConnection<A> {
     connection: A,
-    request_receiver: Receiver<JsonRpcRequest>,
+    request_receiver: Receiver<JsonRpcRequests>,
 }
 
 impl<A> JsonRpcConnection<A>
@@ -52,7 +52,32 @@ where
 }
 
 pub struct JsonRpcClient {
-    request_sender: Mutex<Sender<JsonRpcRequest>>,
+    request_sender: Mutex<Sender<JsonRpcRequests>>,
+}
+
+pub struct JsonRpcClientBatchRequestBuilder<'a> {
+    json_rpc_client: &'a JsonRpcClient,
+    requests: Vec<JsonRpcRequest>,
+}
+
+impl<'a> JsonRpcClientBatchRequestBuilder<'a> {
+    pub fn notify(&mut self, method: &str, params: Option<JsonRpcParams>) {
+        let request = JsonRpcRequest {
+            method: method.to_owned(),
+            params,
+            id: None,
+        };
+        self.requests.push(request);
+    }
+
+    pub async fn send(self) -> bool {
+        let requests = JsonRpcRequests::Batch(self.requests);
+        let result = {
+            let mut sender = self.json_rpc_client.request_sender.lock().await;
+            sender.send(requests).await
+        };
+        result.is_ok()
+    }
 }
 
 // TODO: requests and batch requests/notifications
@@ -62,16 +87,23 @@ impl JsonRpcClient {
         method: &str,
         params: Option<JsonRpcParams>,
     ) -> bool {
-        let request = JsonRpcRequest {
+        let request = JsonRpcRequests::Single(JsonRpcRequest {
             method: method.to_owned(),
             params,
             id: None,
-        };
+        });
         let result = {
             let mut sender = self.request_sender.lock().await;
             sender.send(request).await
         };
         result.is_ok()
+    }
+
+    pub fn batch<'a>(&'a self) -> JsonRpcClientBatchRequestBuilder<'a> {
+        JsonRpcClientBatchRequestBuilder {
+            json_rpc_client: self,
+            requests: Vec::new(),
+        }
     }
 }
 
@@ -184,7 +216,7 @@ where
         };
         let request_opts = {
             request_receiver
-            .map(|request| Ok(Some(JsonRpcMessage::Request(request))))
+            .map(|requests| Ok(Some(JsonRpcMessage::Request(requests))))
         };
         let mut messages = stream::select(response_opts, request_opts);
         loop {

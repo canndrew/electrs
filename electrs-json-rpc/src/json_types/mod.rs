@@ -6,6 +6,7 @@ mod json_rpc_responses;
 mod json_rpc_message;
 mod json_rpc_params;
 mod json_rpc_request;
+mod json_rpc_requests;
 mod json_rpc_response;
 pub mod errors;
 
@@ -17,6 +18,7 @@ pub use self::{
     json_rpc_message::JsonRpcMessage,
     json_rpc_params::JsonRpcParams,
     json_rpc_request::JsonRpcRequest,
+    json_rpc_requests::JsonRpcRequests,
     json_rpc_response::JsonRpcResponse,
 };
 
