@@ -57,6 +57,43 @@ pub enum JsonRpcMessageFromJsonError {
     EmptyBatchArray,
 }
 
+impl JsonRpcMessageFromJsonError {
+    pub fn original_request_id(&self) -> Option<&JsonRpcId> {
+        match self {
+            JsonRpcMessageFromJsonError::MalformedRequest { source } |
+            JsonRpcMessageFromJsonError::MalformedRequestInBatch { source, .. } => {
+                source.original_request_id()
+            },
+            JsonRpcMessageFromJsonError::MalformedResponse { .. } |
+            JsonRpcMessageFromJsonError::MalformedResponseInBatch { .. } |
+            JsonRpcMessageFromJsonError::MalformedObject |
+            JsonRpcMessageFromJsonError::MalformedObjectInBatch { .. } |
+            JsonRpcMessageFromJsonError::InvalidJsonType |
+            JsonRpcMessageFromJsonError::InvalidJsonTypeInBatch { .. } |
+            JsonRpcMessageFromJsonError::HeterogeneousBatchMessage |
+            JsonRpcMessageFromJsonError::EmptyBatchArray => None,
+        }
+    }
+
+    pub fn as_error_response(&self) -> Option<JsonRpcResponse> {
+        match self {
+            JsonRpcMessageFromJsonError::MalformedResponse { .. } |
+            JsonRpcMessageFromJsonError::MalformedResponseInBatch { .. } => return None,
+            _ => (),
+        }
+        let message = self.to_string();
+        let id = self.original_request_id().cloned().unwrap_or(JsonRpcId::Null);
+        Some(JsonRpcResponse {
+            id,
+            result: Err(JsonRpcError {
+                code: JsonRpcErrorCode::INVALID_REQUEST,
+                message,
+                data: None,
+            }),
+        })
+    }
+}
+
 impl TryFrom<JsonValue> for JsonRpcMessage {
     type Error = JsonRpcMessageFromJsonError;
 

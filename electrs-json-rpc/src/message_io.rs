@@ -43,11 +43,35 @@ pub enum ReadMessageError {
     #[error("error derializing json: {}", source)]
     Deserialize {
         source: serde_json::Error,
+        possible_batch_request: bool,
     },
     #[error("error parsing json-rpc message: {}", source)]
     Parse {
         source: JsonRpcMessageFromJsonError,
     },
+}
+
+impl ReadMessageError {
+    pub fn as_error_response(&self) -> Option<JsonRpcResponse> {
+        match self {
+            ReadMessageError::Io { .. } => None,
+            ReadMessageError::Deserialize { source, possible_batch_request } => {
+                if *possible_batch_request {
+                    Some(JsonRpcResponse {
+                        id: JsonRpcId::Null,
+                        result: Err(JsonRpcError {
+                            code: JsonRpcErrorCode::INVALID_REQUEST,
+                            message: source.to_string(),
+                            data: None,
+                        }),
+                    })
+                } else {
+                    None
+                }
+            },
+            ReadMessageError::Parse { source } => source.as_error_response(),
+        }
+    }
 }
 
 impl<A> JsonRpcMessageReader<A>
@@ -67,7 +91,13 @@ where
         };
         let json: JsonValue = match serde_json::from_str(&line) {
             Ok(json) => json,
-            Err(source) => return Err(ReadMessageError::Deserialize { source }),
+            Err(source) => {
+                let possible_batch_request = {
+                    let trimmed = line.trim();
+                    trimmed.starts_with("[") && trimmed.ends_with("]")
+                };
+                return Err(ReadMessageError::Deserialize { source, possible_batch_request });
+            },
         };
         let message = match JsonRpcMessage::try_from(json) {
             Ok(message) => message,

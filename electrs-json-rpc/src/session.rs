@@ -190,7 +190,19 @@ where
                                     }
                                 }
                             },
-                            Err(source) => break Err(ConnectionError::Read { source }),
+                            Err(source) => {
+                                let response_opt = source.as_error_response();
+                                if let Some(response) = response_opt {
+                                    let message = {
+                                        JsonRpcMessage::Response(
+                                            JsonRpcResponses::Single(response)
+                                        )
+                                    };
+                                    let mut message_writer = message_writer.lock().await;
+                                    let _ignore = message_writer.write_message(message).await;
+                                }
+                                break Err(ConnectionError::Read { source })
+                            },
                         }
                         continue;
                     },
