@@ -6,7 +6,7 @@ pub use electrs_json_rpc_macro::{json_rpc_service, json_rpc_client};
 
 use {
     std::{
-        io, mem,
+        io, mem, fmt,
         collections::HashMap,
         convert::{TryFrom, TryInto},
         sync::{
@@ -592,6 +592,26 @@ async fn handle_incoming_response(
     }
 }
 
+pub struct NullService;
+
+#[async_trait]
+impl JsonRpcService for NullService {
+    async fn handle_method<'s, 'm>(
+        &'s self,
+        _method: &'m str,
+        _params: Option<JsonRpcParams>,
+    ) -> Result<JsonValue, HandleMethodError> {
+        Err(HandleMethodError::MethodNotFound)
+    }
+
+    async fn handle_notification<'s, 'm>(
+        &'s self,
+        _method: &'m str,
+        _params: Option<JsonRpcParams>,
+    ) {
+    }
+}
+
 /*
 pub fn run<A, S, C>(
     client_stream: C,
@@ -617,6 +637,38 @@ where
 }
 */
 
+#[derive(Debug, Error)]
+pub enum ClientSendNotificationError {
+    #[error("io error sending notification: {}", source)]
+    Io {
+        source: io::Error,
+    },
+    #[error("connection with server has been dropped")]
+    ConnectionDropped,
+    #[error("error serializing parameters: {}", source)]
+    Serialize {
+        source: serde_json::Error,
+    },
+}
+
+#[derive(Debug, Error)]
+pub enum ClientCallMethodError<E: fmt::Debug + std::error::Error + 'static> {
+    #[error("io error calling method: {}", source)]
+    Io {
+        source: io::Error,
+    },
+    #[error("connection with server has been dropped")]
+    ConnectionDropped,
+    #[error("error serializing parameters: {}", source)]
+    Serialize {
+        source: serde_json::Error,
+    },
+    #[error("error parsing response: {}", source)]
+    ParseResponse {
+        source: E,
+    },
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -624,6 +676,7 @@ mod test {
     use {
         std::{
             collections::HashMap,
+            convert::Infallible,
             time::Duration,
         },
         rand::Rng,
@@ -642,6 +695,13 @@ mod test {
         async fn delay(millis: u64, reply: String) -> Result<String, JsonRpcError> {
             tokio::time::delay_for(Duration::from_millis(millis)).await;
             Ok(reply)
+        }
+    }
+
+    json_rpc_client! {
+        type TestClient {
+            #[method = "delay"]
+            async fn delay(&self, millis: u64, reply: &str) -> Result<Result<JsonValue, JsonRpcError>, ClientCallMethodError<Infallible>>;
         }
     }
 
@@ -671,68 +731,32 @@ mod test {
         let clients = FuturesUnordered::new();
         for _ in 0..NUM_CLIENTS {
             let client = async {
-                let mut tcp_stream = TcpStream::connect(local_addr).await.unwrap();
+                let tcp_stream = TcpStream::connect(local_addr).await.unwrap();
+                let tcp_stream = BufReader::new(tcp_stream);
 
-                let mut rng = rand::thread_rng();
-                let num_requests = rng.gen::<usize>() % MAX_REQUESTS_PER_CLIENT;
-                let mut requests = HashMap::new();
-                let mut buffer = Vec::new();
-                for _ in 0..num_requests {
-                    let delay = (rng.sample::<f64, _>(rand_distr::Exp1) * 1000.0f64) as u64;
-                    let msg = format!("{}", rng.gen::<f64>());
-                    let id = loop {
-                        let id = rng.gen();
-                        if requests.contains_key(&id) {
-                            continue;
-                        }
-                        requests.insert(id, msg.clone());
-                        break id;
-                    };
-                    let request = {
-                        let request = JsonRpcRequest {
-                            method: format!("delay"),
-                            params: {
-                                Some(JsonRpcParams::Array(vec![
-                                    JsonValue::Number(delay.into()),
-                                    JsonValue::String(msg),
-                                ]))
-                            },
-                            id: Some(JsonRpcId::Number(id)),
-                        };
-                        JsonValue::from(request)
-                    };
-                    serde_json::to_writer(&mut buffer, &request).unwrap();
-                    buffer.push(b'\n');
-                    tcp_stream.write_all(buffer.as_slice()).await.unwrap();
-                    buffer.clear();
+                let (client, task) = handle_client(tcp_stream, NullService, 1);
+                let client = TestClient::from_inner(client);
+
+                let send_requests = async move {
+                    let mut rng = rand::thread_rng();
+                    let num_requests = rng.gen::<usize>() % MAX_REQUESTS_PER_CLIENT;
+                    for _ in 0..num_requests {
+                        let delay = (rng.sample::<f64, _>(rand_distr::Exp1) * 1000.0f64) as u64;
+                        let msg = format!("{}", rng.gen::<f64>());
+                        let response = client.delay(delay, &msg).await.unwrap().unwrap();
+                        assert_eq!(response.as_str().unwrap(), msg);
+                    }
+                };
+                let send_requests = send_requests.fuse();
+                pin_mut!(send_requests);
+                let task = task.fuse();
+                pin_mut!(task);
+
+                futures::select! {
+                    () = send_requests => (),
+                    result = task => result.unwrap(),
                 }
 
-                AsyncWriteExt::shutdown(&mut tcp_stream).await.unwrap();
-                let tcp_stream_reader = BufReader::new(tcp_stream);
-                let mut lines = tcp_stream_reader.lines();
-                loop {
-                    let line = match lines.next().await {
-                        Some(line) => line.unwrap(),
-                        None => break,
-                    };
-                    let response_json: JsonValue = {
-                        serde_json::from_slice(line.as_bytes()).unwrap()
-                    };
-                    let response = JsonRpcResponse::try_from(response_json).unwrap();
-                    let id = match response.id {
-                        JsonRpcId::Number(id) => id,
-                        _ => panic!("invalid id"),
-                    };
-                    let msg = match response.result {
-                        Ok(JsonValue::String(msg)) => msg,
-                        _ => panic!("invalid response"),
-                    };
-                    match requests.remove(&id) {
-                        Some(original_msg) => assert_eq!(original_msg, msg),
-                        None => panic!("unknown id"),
-                    };
-                }
-                assert!(requests.is_empty());
                 let clients_finished = {
                     1 + client_num.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                 };
@@ -745,3 +769,4 @@ mod test {
         let ((), ()) = futures::join!(server, clients);
     }
 }
+
