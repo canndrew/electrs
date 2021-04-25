@@ -1,5 +1,6 @@
 use super::*;
 
+mod json_rpc_error_code;
 mod json_rpc_error;
 mod json_rpc_id;
 mod json_rpc_responses;
@@ -11,6 +12,7 @@ mod json_rpc_response;
 pub mod errors;
 
 pub use self::{
+    json_rpc_error_code::JsonRpcErrorCode,
     json_rpc_error::JsonRpcError,
     json_rpc_id::JsonRpcId,
     json_rpc_responses::JsonRpcResponses,

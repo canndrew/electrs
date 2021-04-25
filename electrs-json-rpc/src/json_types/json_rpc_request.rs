@@ -76,31 +76,32 @@ pub enum JsonRpcRequestFromJsonError {
 }
 
 impl JsonRpcRequestFromJsonError {
-    pub fn into_error_response(self) -> JsonRpcResponse {
-        let message = self.to_string();
-        let id_opt = match self {
-            JsonRpcRequestFromJsonError::InvalidJsonType |
-            JsonRpcRequestFromJsonError::MalformedId { .. } => None,
+    pub fn as_error_response(&self) -> Option<JsonRpcResponse> {
+        let id = match self {
+            JsonRpcRequestFromJsonError::InvalidJsonType => return None,
+            JsonRpcRequestFromJsonError::MalformedId { .. } => JsonRpcId::Null,
             JsonRpcRequestFromJsonError::UnrecognizedVersion { id, .. } |
             JsonRpcRequestFromJsonError::InvalidTypeForVersion { id, .. } |
             JsonRpcRequestFromJsonError::MissingVersion { id, .. } |
             JsonRpcRequestFromJsonError::InvalidTypeForMethod { id, .. } |
             JsonRpcRequestFromJsonError::MissingMethod { id, .. } |
             JsonRpcRequestFromJsonError::MalformedParams { id, .. } |
-            JsonRpcRequestFromJsonError::UnrecognizedField { id, .. } => id,
+            JsonRpcRequestFromJsonError::UnrecognizedField { id, .. } => {
+                match id {
+                    Some(id) => id.clone(),
+                    None => return None,
+                }
+            },
         };
-        let id = match id_opt {
-            Some(id) => id,
-            None => JsonRpcId::Null,
-        };
-        JsonRpcResponse {
+        let message = self.to_string();
+        Some(JsonRpcResponse {
             id,
             result: Err(JsonRpcError {
-                code: error_codes::INVALID_REQUEST,
+                code: JsonRpcErrorCode::INVALID_REQUEST,
                 message,
                 data: None,
             })
-        }
+        })
     }
 }
 

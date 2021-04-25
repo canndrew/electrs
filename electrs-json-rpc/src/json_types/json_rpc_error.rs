@@ -2,7 +2,7 @@ use super::*;
 
 #[derive(Debug, Clone)]
 pub struct JsonRpcError {
-    pub code: i16,
+    pub code: JsonRpcErrorCode,
     pub message: String,
     pub data: Option<JsonValue>,
 }
@@ -11,10 +11,10 @@ pub struct JsonRpcError {
 pub enum JsonRpcErrorFromJsonError {
     #[error("json-rpc-error must be json object")]
     ExpectedObject,
-    #[error("error code out of range")]
-    ErrorCodeOutOfRange,
-    #[error("error code is not a number")]
-    ExpectedNumberForCode,
+    #[error("malformed error code: {}", source)]
+    MalformedCode {
+        source: JsonRpcErrorCodeFromJsonError,
+    },
     #[error("missing error code")]
     MissingCode,
     #[error("error message is not a string")]
@@ -31,12 +31,12 @@ impl From<JsonRpcError> for JsonValue {
     fn from(json_rpc_error: JsonRpcError) -> JsonValue {
         match json_rpc_error.data {
             Some(data) => json! {{
-                "code": json_rpc_error.code,
+                "code": JsonValue::from(json_rpc_error.code),
                 "message": json_rpc_error.message,
                 "data": data,
             }},
             None => json! {{
-                "code": json_rpc_error.code,
+                "code": JsonValue::from(json_rpc_error.code),
                 "message": json_rpc_error.message,
             }},
         }
@@ -52,15 +52,11 @@ impl TryFrom<JsonValue> for JsonRpcError {
             _ => return Err(JsonRpcErrorFromJsonError::ExpectedObject),
         };
         let code = match map.remove("code") {
-            Some(code_json) => match code_json {
-                JsonValue::Number(number_json) => {
-                    let code_opt = number_json.as_i64().and_then(|val| val.try_into().ok());
-                    match code_opt {
-                        Some(code) => code,
-                        None => return Err(JsonRpcErrorFromJsonError::ErrorCodeOutOfRange),
-                    }
+            Some(code_json) => match JsonRpcErrorCode::try_from(code_json) {
+                Ok(code) => code,
+                Err(source) => {
+                    return Err(JsonRpcErrorFromJsonError::MalformedCode { source });
                 },
-                _ => return Err(JsonRpcErrorFromJsonError::ExpectedNumberForCode),
             },
             None => return Err(JsonRpcErrorFromJsonError::MissingCode),
         };

@@ -18,21 +18,21 @@ impl HandleMethodError {
         match self {
             HandleMethodError::MethodNotFound => {
                 JsonRpcError {
-                    code: error_codes::METHOD_NOT_FOUND,
+                    code: JsonRpcErrorCode::METHOD_NOT_FOUND,
                     message: format!("method '{}' not found", method),
                     data: None,
                 }
             },
             HandleMethodError::InvalidParams { message, data } => {
                 JsonRpcError {
-                    code: error_codes::INVALID_PARAMS,
+                    code: JsonRpcErrorCode::INVALID_PARAMS,
                     message: format!("invalid params: {}", message),
                     data,
                 }
             },
             HandleMethodError::InternalError { message, data } => {
                 JsonRpcError {
-                    code: error_codes::INTERNAL_ERROR,
+                    code: JsonRpcErrorCode::INTERNAL_ERROR,
                     message,
                     data,
                 }
