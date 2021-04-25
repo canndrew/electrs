@@ -237,6 +237,38 @@ pub struct JsonRpcServiceImpl {
     impl_token: Token![impl],
 }
 
+fn attr_extract_name(attr: &Attribute, kind: &str) -> String {
+    match attr.parse_meta().unwrap() {
+        Meta::NameValue(meta_name_value) => {
+            match meta_name_value.lit {
+                Lit::Str(lit_str) => {
+                    let name = lit_str.value();
+                    if name.starts_with("rpc.") {
+                        abort!(
+                            lit_str.span(),
+                            "names beginning with 'rpc.' are reserved",
+                        );
+                    }
+                    name
+                },
+                _ => {
+                    abort!(
+                        meta_name_value.lit.span(),
+                        "{} name must be a string", kind,
+                    )
+                },
+            }
+        },
+        _ => {
+            abort!(
+                attr.span(),
+                "Invalid use of attribute";
+                help = "Syntax is #[{} = \"name\"]", kind,
+            )
+        },
+    }
+}
+
 impl JsonRpcServiceImpl {
     pub fn parse_impl(item_impl: &mut ItemImpl) -> JsonRpcServiceImpl {
         let ItemImpl {
@@ -285,26 +317,7 @@ impl JsonRpcServiceImpl {
                 }
             };
             if attr.path.is_ident("method") {
-                let name = match attr.parse_meta().unwrap() {
-                    Meta::NameValue(meta_name_value) => {
-                        match meta_name_value.lit {
-                            Lit::Str(lit_str) => lit_str.value(),
-                            _ => {
-                                abort!(
-                                    meta_name_value.lit.span(),
-                                    "method name must be a string",
-                                )
-                            },
-                        }
-                    },
-                    _ => {
-                        abort!(
-                            attr.span(),
-                            "Invalid use of attribute";
-                            help = "Syntax is #[method = \"method_name\"]",
-                        )
-                    },
-                };
+                let name = attr_extract_name(&attr, "method");
                 let methods_of_arity = methods.entry(name.clone()).or_default();
                 let arity = match impl_item_method.sig.receiver() {
                     None => impl_item_method.sig.inputs.len(),
@@ -332,26 +345,7 @@ impl JsonRpcServiceImpl {
                     None => ()
                 };
             } else if attr.path.is_ident("notification") {
-                let name = match attr.parse_meta().unwrap() {
-                    Meta::NameValue(meta_name_value) => {
-                        match meta_name_value.lit {
-                            Lit::Str(lit_str) => lit_str.value(),
-                            _ => {
-                                abort!(
-                                    meta_name_value.lit.span(),
-                                    "notification name must be a string",
-                                )
-                            },
-                        }
-                    },
-                    _ => {
-                        abort!(
-                            attr.span(),
-                            "Invalid use of attribute";
-                            help = "Syntax is #[notification = \"notification_name\"]",
-                        )
-                    },
-                };
+                let name = attr_extract_name(&attr, "notification");
                 let notifications_of_arity = notifications.entry(name.clone()).or_default();
                 let arity = match impl_item_method.sig.receiver() {
                     None => impl_item_method.sig.inputs.len(),

@@ -268,7 +268,13 @@ async fn handle_method_call<S>(
 where
     S: JsonRpcService,
 {
-    let result = service.handle_method(&method, params).await;
+    let result = {
+        if method.starts_with("rpc.") {
+            Err(HandleMethodError::MethodNotFound)
+        } else {
+            service.handle_method(&method, params).await
+        }
+    };
     JsonRpcResponse {
         id,
         result: result.map_err(|err| err.into_json_rpc_error(&method)),
