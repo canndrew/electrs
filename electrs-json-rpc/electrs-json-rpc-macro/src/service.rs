@@ -13,6 +13,12 @@ impl ServiceSignature {
         sig: &syn::Signature,
         attr_span: Span,
     ) -> ServiceSignature {
+        if let Some(unsafe_) = sig.unsafety {
+            abort!(
+                unsafe_.span(),
+                "method/notifcation handlers cannot be unsafe",
+            );
+        }
         let is_async = sig.asyncness.is_some();
         let mut is_static = true;
         let mut params = Vec::with_capacity(sig.inputs.len());
@@ -228,13 +234,43 @@ pub struct JsonRpcServiceImpl {
     self_ty: Type,
     generics: Generics,
     top_attr_span: Span,
+    impl_token: Token![impl],
 }
 
 impl JsonRpcServiceImpl {
     pub fn parse_impl(item_impl: &mut ItemImpl) -> JsonRpcServiceImpl {
+        let ItemImpl {
+            attrs: _,
+            defaultness,
+            unsafety,
+            impl_token,
+            generics,
+            trait_,
+            self_ty,
+            brace_token: _,
+            items,
+        } = item_impl;
+        if let Some(default_) = defaultness {
+            abort!(
+                default_.span(),
+                "json_rpc_service impl cannot be default",
+            )
+        }
+        if let Some(unsafe_) = unsafety {
+            abort!(
+                unsafe_.span(),
+                "json_rpc_service impl cannot be unsafe",
+            )
+        }
+        if let Some((_bang, trait_, _for_token)) = trait_ {
+            abort!(
+                trait_.span(),
+                "#[json_rpc_service] can only used on inherent impls",
+            )
+        }
         let mut methods: HashMap<String, HashMap<usize, ServiceMethodSignature>> = HashMap::new();
         let mut notifications: HashMap<String, HashMap<usize, ServiceSignature>> = HashMap::new();
-        for impl_item in &mut item_impl.items {
+        for impl_item in items {
             let impl_item_method = match impl_item {
                 ImplItem::Method(impl_item_method) => impl_item_method,
                 _ => continue,
@@ -338,10 +374,18 @@ impl JsonRpcServiceImpl {
                 unreachable!()
             }
         }
-        let self_ty = (&*item_impl.self_ty).clone();
-        let generics = item_impl.generics.clone();
+        let self_ty = (&**self_ty).clone();
+        let generics = generics.clone();
+        let impl_token = impl_token.clone();
         let top_attr_span = item_impl.span();
-        JsonRpcServiceImpl { methods, notifications, self_ty, generics, top_attr_span }
+        JsonRpcServiceImpl {
+            methods,
+            notifications,
+            self_ty,
+            generics,
+            top_attr_span,
+            impl_token,
+        }
     }
 
     pub fn into_syn(&self) -> TokenStream {
@@ -446,10 +490,11 @@ impl JsonRpcServiceImpl {
             notification_branches.push(notification_branch);
         }
         let self_ty = &self.self_ty;
-        let (impl_generics, _type_generics, where_clause_opt) = self.generics.split_for_impl();
+        let (impl_generics, type_generics, where_clause_opt) = self.generics.split_for_impl();
+        let impl_token = &self.impl_token;
         quote_spanned! {top_attr_span=>
             #[async_trait]
-            impl #impl_generics JsonRpcService for #self_ty
+            #impl_token #impl_generics JsonRpcService for #self_ty #type_generics
             #where_clause_opt
             {
                 async fn handle_method<'s, 'm>(

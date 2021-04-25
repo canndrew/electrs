@@ -3,7 +3,9 @@ use {
     std::collections::HashMap,
     syn::{
         Ident, Type, Meta, FnArg, Lit, Pat, parse_quote, ItemImpl, ImplItem, Receiver,
-        ReturnType, Generics, Token, braced, Visibility, TraitItem, token, parse,
+        ReturnType, Generics, Token, braced, Visibility, TraitItem, parse, Abi,
+        GenericParam,
+        token::Unsafe,
         spanned::Spanned,
         parse::{Parse, ParseStream},
     },

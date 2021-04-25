@@ -2,29 +2,29 @@ use super::*;
 
 pub struct JsonRpcClientImplSyntax {
     visibility: Visibility,
-    #[allow(unused)] // FIXME
-    type_token: Token![type],
     ident: Ident,
-    #[allow(unused)]
-    brace_token: token::Brace,
     items: Vec<TraitItem>,
     full_span: Span,
+    io_generic: GenericParam,
 }
 
 impl Parse for JsonRpcClientImplSyntax {
     fn parse(input: ParseStream) -> Result<JsonRpcClientImplSyntax, parse::Error> {
         let visibility = input.parse()?;
-        let type_token = input.parse()?;
+        let _: Token![type] = input.parse()?;
         let ident = input.parse()?;
+        let _: Token![<] = input.parse()?;
+        let io_generic = input.parse()?;
+        let _: Token![>] = input.parse()?;
         let content;
-        let brace_token = braced!(content in input);
+        let _ = braced!(content in input);
         let mut items = Vec::new();
         while !content.is_empty() {
             items.push(content.parse()?);
         }
         let full_span = input.span();
         Ok(JsonRpcClientImplSyntax {
-            visibility, type_token, ident, brace_token, items, full_span,
+            visibility, ident, items, full_span, io_generic,
         })
     }
 }
@@ -35,6 +35,7 @@ pub struct JsonRpcClientImpl {
     notifications: HashMap<Ident, ClientMethodSignature>,
     methods: HashMap<Ident, ClientMethodSignature>,
     full_span: Span,
+    io_generic: GenericParam,
 }
 
 impl JsonRpcClientImpl {
@@ -147,7 +148,15 @@ impl JsonRpcClientImpl {
             }
         }
         let full_span = client_syntax.full_span;
-        JsonRpcClientImpl { visibility, name, notifications, methods, full_span }
+        let io_generic = client_syntax.io_generic;
+        JsonRpcClientImpl {
+            visibility,
+            name,
+            notifications,
+            methods,
+            full_span,
+            io_generic,
+        }
     }
 
     pub fn into_syn(&self) -> TokenStream {
@@ -163,8 +172,20 @@ impl JsonRpcClientImpl {
             let receiver = &signature.receiver;
             let return_type = &signature.return_type;
             let sig_span = signature.sig_span;
+            let unsafety = &signature.unsafety;
+            let abi = &signature.abi;
+            let fn_token = &signature.fn_token;
+            let async_token = &signature.async_token;
+            let (impl_generics, _type_generics, where_clause_opt) = {
+                signature.generics.split_for_impl()
+            };
             let notification = quote_spanned! {sig_span=>
-                async fn #impl_name(#receiver, #(#param_sigs,)*) -> #return_type {
+                pub #async_token #unsafety #abi #fn_token #impl_name #impl_generics (
+                    #receiver,
+                    #(#param_sigs,)*
+                ) -> #return_type
+                #where_clause_opt
+                {
                     let __params = if #params_len > 0 {
                         let mut __params_array = Vec::with_capacity(#params_len);
                         #(#params_to_json)*
@@ -177,7 +198,7 @@ impl JsonRpcClientImpl {
                         Err(ClientSendRequestError::Io { source }) => {
                             Err(ClientSendNotificationError::Io { source })
                         },
-                        Err(SendMesageError::ConnectionDropped) => {
+                        Err(ClientSendRequestError::ConnectionDropped) => {
                             Err(ClientSendNotificationError::ConnectionDropped)
                         },
                     }
@@ -193,8 +214,20 @@ impl JsonRpcClientImpl {
             let receiver = &signature.receiver;
             let return_type = &signature.return_type;
             let sig_span = signature.sig_span;
+            let unsafety = &signature.unsafety;
+            let abi = &signature.abi;
+            let fn_token = &signature.fn_token;
+            let async_token = &signature.async_token;
+            let (impl_generics, _type_generics, where_clause_opt) = {
+                signature.generics.split_for_impl()
+            };
             let method = quote_spanned! {sig_span=>
-                async fn #impl_name(#receiver, #(#param_sigs,)*) -> #return_type {
+                pub #async_token #unsafety #abi #fn_token #impl_name #impl_generics (
+                    #receiver,
+                    #(#param_sigs,)*
+                ) -> #return_type
+                #where_clause_opt
+                {
                     let __params = if #params_len > 0 {
                         let mut __params_array = Vec::with_capacity(#params_len);
                         #(#params_to_json)*
@@ -219,20 +252,24 @@ impl JsonRpcClientImpl {
             };
             method_impls.push(method);
         }
+        let io_generic = &self.io_generic;
         quote_spanned! {self.full_span=>
-            #visibility struct #name<A> {
-                client: JsonRpcClient<A>,
+            #visibility struct #name<#io_generic>
+            {
+                client: JsonRpcClient<#io_generic>,
             }
 
-            impl<A> #name<A>
+            impl<#io_generic> #name<#io_generic>
             where
-                A: AsyncWrite + Unpin,
+                #io_generic: AsyncWrite + Unpin,
             {
-                pub fn from_inner(client: JsonRpcClient<A>) -> #name<A> {
+                pub fn from_inner(client: JsonRpcClient<#io_generic>)
+                    -> #name<#io_generic>
+                {
                     #name { client }
                 }
 
-                pub fn into_inner(self) -> JsonRpcClient<A> {
+                pub fn into_inner(self) -> JsonRpcClient<#io_generic> {
                     self.client
                 }
 
@@ -249,6 +286,11 @@ struct ClientMethodSignature {
     receiver: Receiver,
     sig_span: Span,
     return_type: Type,
+    unsafety: Option<Unsafe>,
+    abi: Option<Abi>,
+    fn_token: Token![fn],
+    async_token: Token![async],
+    generics: Generics,
 }
 
 impl ClientMethodSignature {
@@ -256,6 +298,32 @@ impl ClientMethodSignature {
         sig: &syn::Signature,
         name: String,
     ) -> ClientMethodSignature {
+        if let Some(const_) = sig.constness {
+            abort!(
+                const_.span(),
+                "json_rpc_client methods cannot be const",
+            )
+        }
+        let async_token = match sig.asyncness {
+            None => {
+                abort!(
+                    sig.span(),
+                    "json_rpc_client methods must be async",
+                )
+            },
+            Some(async_) => async_.clone(),
+        };
+        if let Some(variadic) = &sig.variadic {
+            abort!(
+                variadic.span(),
+                "variadic methods are not currently supported",
+            );
+        }
+        let unsafety = sig.unsafety.clone();
+        let abi = sig.abi.clone();
+        let fn_token = sig.fn_token.clone();
+        let generics = sig.generics.clone();
+
         let mut receiver_opt = None;
         let mut params = Vec::with_capacity(sig.inputs.len());
         for fn_arg in &sig.inputs {
@@ -283,7 +351,16 @@ impl ClientMethodSignature {
             ReturnType::Type(_, return_type) => (&**return_type).clone(),
         };
         ClientMethodSignature {
-            params, name, receiver, sig_span, return_type,
+            params,
+            name,
+            receiver,
+            sig_span,
+            return_type,
+            unsafety,
+            abi,
+            fn_token,
+            async_token,
+            generics,
         }
     }
 

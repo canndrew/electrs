@@ -25,7 +25,7 @@ impl TestService {
 }
 
 json_rpc_client! {
-    type TestClient {
+    type TestClient<A> {
         #[method = "delay"]
         async fn delay(&self, millis: u64, reply: &str)
             -> Result<Result<JsonValue, JsonRpcError>, ClientCallMethodError<Infallible>>;
@@ -33,7 +33,7 @@ json_rpc_client! {
 }
 
 #[tokio::test]
-async fn start_server() {
+async fn spam_lots_of_requests() {
     const NUM_CLIENTS: usize = 1000;
     const MAX_REQUESTS_PER_CLIENT: usize = 100;
 
