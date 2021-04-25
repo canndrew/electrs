@@ -107,15 +107,9 @@ where
                                     Some(id) => {
                                         let service = &service;
                                         let future = async move {
-                                            let result = {
-                                                service.handle_method(&method, params).await
-                                            };
-                                            let response = JsonRpcResponse {
-                                                id,
-                                                result: result.map_err(|err| {
-                                                    err.into_json_rpc_error(&method)
-                                                }),
-                                            };
+                                            let response = handle_method_call(
+                                                service, id, &method, params,
+                                            ).await;
                                             Some(JsonRpcResponses::Single(response))
                                         };
                                         active_requests.push(
@@ -159,15 +153,9 @@ where
                                             let responses = responses.clone();
                                             let service = &service;
                                             let future = async move {
-                                                let result = {
-                                                    service.handle_method(&method, params).await
-                                                };
-                                                let response = JsonRpcResponse {
-                                                    id,
-                                                    result: result.map_err(|err| {
-                                                        err.into_json_rpc_error(&method)
-                                                    }),
-                                                };
+                                                let response = handle_method_call(
+                                                    service, id, &method, params,
+                                                ).await;
                                                 let mut responses = responses.lock().await;
                                                 responses.push(response);
                                                 if responses.len() == num_method_calls {
@@ -268,6 +256,22 @@ async fn handle_incoming_response(
             }
             let _ignore_error = result_sender.send(results);
         },
+    }
+}
+
+async fn handle_method_call<S>(
+    service: &S,
+    id: JsonRpcId,
+    method: &str,
+    params: Option<JsonRpcParams>,
+) -> JsonRpcResponse
+where
+    S: JsonRpcService,
+{
+    let result = service.handle_method(&method, params).await;
+    JsonRpcResponse {
+        id,
+        result: result.map_err(|err| err.into_json_rpc_error(&method)),
     }
 }
 
