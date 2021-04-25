@@ -10,12 +10,12 @@ impl From<JsonRpcResponse> for JsonValue {
     fn from(json_rpc_response: JsonRpcResponse) -> JsonValue {
         match json_rpc_response.result {
             Ok(value) => json! {{
-                "jsonrpc": "2.0",
+                "jsonrpc": JSON_RPC_VERSION,
                 "id": JsonValue::from(json_rpc_response.id),
                 "result": value,
             }},
             Err(err) => json! {{
-                "jsonrpc": "2.0",
+                "jsonrpc": JSON_RPC_VERSION,
                 "id": JsonValue::from(json_rpc_response.id),
                 "error": JsonValue::from(err),
             }},
@@ -80,7 +80,7 @@ impl TryFrom<JsonValue> for JsonRpcResponse {
         match map.remove("jsonrpc") {
             Some(jsonrpc_json) => match jsonrpc_json {
                 JsonValue::String(jsonrpc_string) => {
-                    if jsonrpc_string != "2.0" {
+                    if jsonrpc_string != JSON_RPC_VERSION {
                         return Err(JsonRpcResponseFromJsonError::UnrecognizedVersion {
                             version: jsonrpc_string,
                             id,

@@ -47,6 +47,8 @@ pub mod client;
 mod session;
 mod service;
 
+pub const JSON_RPC_VERSION: &'static str = "2.0";
+
 pub mod error_codes {
     pub const PARSE_ERROR: i16 = -32700;
     pub const INVALID_REQUEST: i16 = -32600;

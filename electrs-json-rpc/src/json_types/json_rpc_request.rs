@@ -11,21 +11,21 @@ impl From<JsonRpcRequest> for JsonValue {
     fn from(json_rpc_request: JsonRpcRequest) -> JsonValue {
         match (json_rpc_request.params, json_rpc_request.id) {
             (None, None) => json! {{
-                "jsonrpc": "2.0",
+                "jsonrpc": JSON_RPC_VERSION,
                 "method": json_rpc_request.method,
             }},
             (None, Some(id)) => json! {{
-                "jsonrpc": "2.0",
+                "jsonrpc": JSON_RPC_VERSION,
                 "method": json_rpc_request.method,
                 "id": JsonValue::from(id),
             }},
             (Some(params), None) => json! {{
-                "jsonrpc": "2.0",
+                "jsonrpc": JSON_RPC_VERSION,
                 "method": json_rpc_request.method,
                 "params": JsonValue::from(params),
             }},
             (Some(params), Some(id)) => json! {{
-                "jsonrpc": "2.0",
+                "jsonrpc": JSON_RPC_VERSION,
                 "method": json_rpc_request.method,
                 "params": JsonValue::from(params),
                 "id": JsonValue::from(id),
@@ -124,7 +124,7 @@ impl TryFrom<JsonValue> for JsonRpcRequest {
         match map.remove("jsonrpc") {
             Some(version_json) => match version_json {
                 JsonValue::String(version) => {
-                    if version != "2.0" {
+                    if version != JSON_RPC_VERSION {
                         return Err(JsonRpcRequestFromJsonError::UnrecognizedVersion {
                             version, id,
                         });
