@@ -194,7 +194,7 @@ impl MethodImpl {
                 },
                 Err(err) => {
                     Err(HandleMethodError::ApplicationError(
-                        IntoJsonRpcError::into_json_rpc_error(err),
+                        JsonRpcError::from(err),
                     ))
                 },
             }
