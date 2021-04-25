@@ -694,7 +694,7 @@ impl ClientType {
                     };
                     match self.client.notify(#name, __params).await {
                         Ok(()) => Ok(()),
-                        Err(SendMessageError::Io { source }) => {
+                        Err(ClientSendRequestError::Io { source }) => {
                             Err(ClientSendNotificationError::Io { source })
                         },
                         Err(SendMesageError::ConnectionDropped) => {
@@ -728,10 +728,10 @@ impl ClientType {
                             Err(source) => Err(ClientCallMethodError::ParseResponse { source }),
                         },
                         Ok(Err(json_rpc_error)) => Ok(Err(json_rpc_error.into())),
-                        Err(SendMessageError::Io { source }) => {
+                        Err(ClientSendRequestError::Io { source }) => {
                             Err(ClientCallMethodError::Io { source })
                         },
-                        Err(SendMessageError::ConnectionDropped) => {
+                        Err(ClientSendRequestError::ConnectionDropped) => {
                             Err(ClientCallMethodError::ConnectionDropped)
                         },
                     }

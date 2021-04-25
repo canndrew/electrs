@@ -10,7 +10,6 @@ mod json_rpc_requests;
 mod json_rpc_response;
 pub mod errors;
 
-use self::errors::*;
 pub use self::{
     json_rpc_error::JsonRpcError,
     json_rpc_id::JsonRpcId,
