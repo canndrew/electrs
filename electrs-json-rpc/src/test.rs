@@ -10,7 +10,7 @@ use {
         net::{TcpStream, TcpListener},
     },
     futures::{StreamExt, stream::FuturesUnordered},
-    crate::client::{ClientSendRequestError, ClientCallMethodError},
+    crate::client::ClientCallMethodError,
 };
 
 struct TestService;

@@ -189,17 +189,17 @@ impl JsonRpcClientImpl {
                     let __params = if #params_len > 0 {
                         let mut __params_array = Vec::with_capacity(#params_len);
                         #(#params_to_json)*
-                        Some(JsonRpcParams::Array(__params_array))
+                        Some(electrs_json_rpc::json_types::JsonRpcParams::Array(__params_array))
                     } else {
                         None
                     };
                     match self.client.notify(#name, __params).await {
                         Ok(()) => Ok(()),
-                        Err(ClientSendRequestError::Io { source }) => {
-                            Err(ClientSendNotificationError::Io { source })
+                        Err(electrs_json_rpc::client::ClientSendRequestError::Io { source }) => {
+                            Err(electrs_json_rpc::client::ClientSendNotificationError::Io { source })
                         },
-                        Err(ClientSendRequestError::ConnectionDropped) => {
-                            Err(ClientSendNotificationError::ConnectionDropped)
+                        Err(electrs_json_rpc::client::ClientSendRequestError::ConnectionDropped) => {
+                            Err(electrs_json_rpc::client::ClientSendNotificationError::ConnectionDropped)
                         },
                     }
                 }
@@ -231,21 +231,21 @@ impl JsonRpcClientImpl {
                     let __params = if #params_len > 0 {
                         let mut __params_array = Vec::with_capacity(#params_len);
                         #(#params_to_json)*
-                        Some(JsonRpcParams::Array(__params_array))
+                        Some(electrs_json_rpc::json_types::JsonRpcParams::Array(__params_array))
                     } else {
                         None
                     };
                     match self.client.call_method(#name, __params).await {
                         Ok(Ok(value_json)) => match value_json.try_into() {
                             Ok(value) => Ok(Ok(value)),
-                            Err(source) => Err(ClientCallMethodError::ParseResponse { source }),
+                            Err(source) => Err(electrs_json_rpc::client::ClientCallMethodError::ParseResponse { source }),
                         },
                         Ok(Err(json_rpc_error)) => Ok(Err(json_rpc_error.into())),
-                        Err(ClientSendRequestError::Io { source }) => {
-                            Err(ClientCallMethodError::Io { source })
+                        Err(electrs_json_rpc::client::ClientSendRequestError::Io { source }) => {
+                            Err(electrs_json_rpc::client::ClientCallMethodError::Io { source })
                         },
-                        Err(ClientSendRequestError::ConnectionDropped) => {
-                            Err(ClientCallMethodError::ConnectionDropped)
+                        Err(electrs_json_rpc::client::ClientSendRequestError::ConnectionDropped) => {
+                            Err(electrs_json_rpc::client::ClientCallMethodError::ConnectionDropped)
                         },
                     }
                 }
@@ -256,20 +256,20 @@ impl JsonRpcClientImpl {
         quote_spanned! {self.full_span=>
             #visibility struct #name<#io_generic>
             {
-                client: JsonRpcClient<#io_generic>,
+                client: electrs_json_rpc::client::JsonRpcClient<#io_generic>,
             }
 
             impl<#io_generic> #name<#io_generic>
             where
-                #io_generic: AsyncWrite + Unpin,
+                #io_generic: electrs_json_rpc::_reexports::AsyncWrite + Unpin,
             {
-                pub fn from_inner(client: JsonRpcClient<#io_generic>)
+                pub fn from_inner(client: electrs_json_rpc::client::JsonRpcClient<#io_generic>)
                     -> #name<#io_generic>
                 {
                     #name { client }
                 }
 
-                pub fn into_inner(self) -> JsonRpcClient<#io_generic> {
+                pub fn into_inner(self) -> electrs_json_rpc::client::JsonRpcClient<#io_generic> {
                     self.client
                 }
 
@@ -381,9 +381,9 @@ impl ClientMethodSignature {
         for (param_name, _param_type) in &self.params {
             let span = param_name.span();
             let param_to_json = quote_spanned! {span=>
-                let #param_name = match serde_json::to_value(#param_name) {
+                let #param_name = match electrs_json_rpc::_reexports::to_value(#param_name) {
                     Ok(#param_name) => #param_name,
-                    Err(source) => return Err(#error_type::Serialize { source }),
+                    Err(source) => return Err(electrs_json_rpc::client::#error_type::Serialize { source }),
                 };
                 __params_array.push(#param_name);
             };

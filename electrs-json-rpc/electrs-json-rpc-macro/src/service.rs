@@ -67,9 +67,9 @@ impl ServiceSignature {
             let span = ty.span();
             let on_error = if method_call {
                 quote_spanned! {span=>
-                    Err(HandleMethodError::InvalidParams {
+                    Err(electrs_json_rpc::HandleMethodError::InvalidParams {
                         message: format!("parameter {} malformed", stringify!(#name)),
-                        data: Some(JsonValue::String(format!("{}", err))),
+                        data: Some(electrs_json_rpc::_reexports::JsonValue::String(format!("{}", err))),
                     })
                 }
             } else {
@@ -78,7 +78,7 @@ impl ServiceSignature {
                 }
             };
             let param_from_json = quote_spanned! {span=>
-                let #name: #ty = match serde_json::from_value(#name) {
+                let #name: #ty = match electrs_json_rpc::_reexports::from_value(#name) {
                     Ok(#name) => #name,
                     Err(err) => return #on_error,
                 };
@@ -115,7 +115,7 @@ impl ServiceSignature {
         let mut params_from_array = Vec::with_capacity(self.params.len());
         for (name, _ty) in &self.params {
             let param_from_array = quote_spanned! {attr_span=>
-                let #name: JsonValue = __array_values_iter.next().unwrap();
+                let #name: electrs_json_rpc::_reexports::JsonValue = __array_values_iter.next().unwrap();
             };
             params_from_array.push(param_from_array);
         }
@@ -135,7 +135,7 @@ impl ServiceSignature {
         for (name, _ty) in &self.params {
             let on_error = if method_call {
                 quote_spanned! {attr_span=>
-                    Err(HandleMethodError::InvalidParams {
+                    Err(electrs_json_rpc::HandleMethodError::InvalidParams {
                         message: format!("parameter {} missing", stringify!(#name)),
                         data: None,
                     })
@@ -146,7 +146,7 @@ impl ServiceSignature {
                 }
             };
             let param_from_object = quote_spanned! {attr_span=>
-                let #name: JsonValue = match __object_values.remove(stringify!(#name)) {
+                let #name: electrs_json_rpc::_reexports::JsonValue = match __object_values.remove(stringify!(#name)) {
                     Some(value) => value,
                     None => return #on_error,
                 };
@@ -175,19 +175,19 @@ impl ServiceMethodSignature {
         quote_spanned! {return_span=>
             match __method_call_result {
                 Ok(value) => {
-                    match serde_json::to_value(value) {
+                    match electrs_json_rpc::_reexports::to_value(value) {
                         Ok(value) => Ok(value),
                         Err(err) => {
-                            return Err(HandleMethodError::InternalError {
+                            return Err(electrs_json_rpc::HandleMethodError::InternalError {
                                 message: format!("json serialization of return value failed"),
-                                data: Some(JsonValue::String(format!("{}", err))),
+                                data: Some(electrs_json_rpc::_reexports::JsonValue::String(format!("{}", err))),
                             });
                         },
                     }
                 },
                 Err(err) => {
-                    Err(HandleMethodError::ApplicationError(
-                        JsonRpcError::from(err),
+                    Err(electrs_json_rpc::HandleMethodError::ApplicationError(
+                        electrs_json_rpc::json_types::JsonRpcError::from(err),
                     ))
                 },
             }
@@ -389,7 +389,7 @@ impl JsonRpcServiceImpl {
             let no_params = match methods_of_arity.get(&0) {
                 Some(method_impl) => method_impl.call_syn(&self.self_ty),
                 None => quote_spanned! {top_attr_span=>
-                    return Err(HandleMethodError::InvalidParams {
+                    return Err(electrs_json_rpc::HandleMethodError::InvalidParams {
                         message: format!("missing parameters"),
                         data: None,
                     })
@@ -414,22 +414,22 @@ impl JsonRpcServiceImpl {
                 #name => {
                     match __params {
                         None => #no_params,
-                        Some(JsonRpcParams::Array(__array_values)) => {
+                        Some(electrs_json_rpc::json_types::JsonRpcParams::Array(__array_values)) => {
                             match __array_values.len() {
                                 #(#calls_with_array,)*
                                 _ => {
-                                    return Err(HandleMethodError::InvalidParams {
+                                    return Err(electrs_json_rpc::HandleMethodError::InvalidParams {
                                         message: format!("invalid number of parameters"),
                                         data: None,
                                     });
                                 },
                             }
                         },
-                        Some(JsonRpcParams::Object(mut __object_values)) => {
+                        Some(electrs_json_rpc::json_types::JsonRpcParams::Object(mut __object_values)) => {
                             match __object_values.len() {
                                 #(#calls_with_object,)*
                                 _ => {
-                                    return Err(HandleMethodError::InvalidParams {
+                                    return Err(electrs_json_rpc::HandleMethodError::InvalidParams {
                                         message: format!("invalid number of parameters"),
                                         data: None,
                                     });
@@ -466,13 +466,13 @@ impl JsonRpcServiceImpl {
                 #name => {
                     match __params {
                         None => #no_params,
-                        Some(JsonRpcParams::Array(__array_values)) => {
+                        Some(electrs_json_rpc::json_types::JsonRpcParams::Array(__array_values)) => {
                             match __array_values.len() {
                                 #(#calls_with_array,)*
                                 _ => (),
                             }
                         },
-                        Some(JsonRpcParams::Object(mut __object_values)) => {
+                        Some(electrs_json_rpc::json_types::JsonRpcParams::Object(mut __object_values)) => {
                             match __object_values.len() {
                                 #(#calls_with_object,)*
                                 _ => (),
@@ -487,27 +487,27 @@ impl JsonRpcServiceImpl {
         let (impl_generics, type_generics, where_clause_opt) = self.generics.split_for_impl();
         let impl_token = &self.impl_token;
         quote_spanned! {top_attr_span=>
-            #[async_trait]
-            #impl_token #impl_generics JsonRpcService for #self_ty #type_generics
+            #[electrs_json_rpc::_reexports::async_trait]
+            #impl_token #impl_generics electrs_json_rpc::JsonRpcService for #self_ty #type_generics
             #where_clause_opt
             {
                 async fn handle_method<'s, 'm>(
                     &'s self,
                     __method: &'m str,
-                    __params: Option<JsonRpcParams>,
+                    __params: Option<electrs_json_rpc::json_types::JsonRpcParams>,
                 )
-                    -> Result<JsonValue, HandleMethodError>
+                    -> Result<electrs_json_rpc::_reexports::JsonValue, electrs_json_rpc::HandleMethodError>
                 {
                     match __method {
                         #(#method_branches,)*
-                        _ => Err(HandleMethodError::MethodNotFound),
+                        _ => Err(electrs_json_rpc::HandleMethodError::MethodNotFound),
                     }
                 }
 
                 async fn handle_notification<'s, 'm>(
                     &'s self,
                     __method: &'m str,
-                    __params: Option<JsonRpcParams>,
+                    __params: Option<electrs_json_rpc::json_types::JsonRpcParams>,
                 ) {
                     match __method {
                         #(#notification_branches,)*

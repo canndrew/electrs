@@ -41,11 +41,17 @@ use {
     },
 };
 
+#[allow(unused)]
+use crate as electrs_json_rpc;
+
 pub mod json_types;
 pub mod message_io;
 pub mod client;
 mod session;
 mod service;
+
+#[doc(hidden)]
+pub mod _reexports;
 
 pub const JSON_RPC_VERSION: &'static str = "2.0";
 

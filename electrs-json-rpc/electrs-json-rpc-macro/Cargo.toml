@@ -12,4 +12,5 @@ syn = "1.0.69"
 quote = "1.0.9"
 proc-macro2 = "1.0.26"
 proc-macro-error = "*"
+proc-macro-crate = "*"
 
