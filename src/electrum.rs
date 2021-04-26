@@ -7,6 +7,11 @@ use bitcoin::{
 use rayon::prelude::*;
 use serde_derive::{Deserialize, Serialize};
 use serde_json::{from_value, json, Value};
+use electrs_json_rpc::{
+    json_rpc_service, json_rpc_client,
+    client::ClientSendNotificationError,
+    json_types::JsonRpcError,
+};
 
 use std::collections::HashMap;
 use std::iter::FromIterator;
@@ -319,3 +324,86 @@ impl Rpc {
 fn notification(method: &str, params: &[Value]) -> Value {
     json!({"jsonrpc": "2.0", "method": method, "params": params})
 }
+
+pub struct RpcService {
+}
+
+#[json_rpc_service]
+impl RpcService {
+    #[method = "blockchain.scripthash.get_history"]
+    pub async fn scripthash_get_history(scripthash: ScriptHash)
+        -> Result<Vec<Value>, JsonRpcError>
+    {
+        drop(scripthash);
+        unimplemented!()
+    }
+
+    #[method = "blockchain.scripthash.subscribe"]
+    pub async fn scripthash_subscribe(scripthash: ScriptHash)
+        -> Result<ScriptHashStatus, JsonRpcError>
+    {
+        drop(scripthash);
+        unimplemented!()
+    }
+
+    #[method = "blockchain.transaction.broadcast"]
+    pub async fn transaction_broadcast(raw_tx: RawTx)
+        -> Result<Txid, JsonRpcError>
+    {
+        drop(raw_tx);
+        unimplemented!()
+    }
+
+    #[method = "blockchain.transaction.get"]
+    pub async fn transaction_get(tx_hash: Txid)
+        -> Result<RawTx, JsonRpcError>
+    {
+        drop(tx_hash);
+        unimplemented!()
+    }
+
+    #[method = "blockchain.transaction.get"]
+    pub async fn transaction_get_verbose(tx_hash: Txid, verbose: bool)
+        -> Result<RawTx, JsonRpcError>
+    {
+        if !verbose {
+            return RpcService::transaction_get(tx_hash).await;
+        }
+        drop(tx_hash);
+        drop(verbose);
+        unimplemented!()
+    }
+
+    /*
+    #[method = "blockchain.transaction.get_merkle"]
+    #[method = "server.banner"]
+    #[method = "server.donation_address"]
+    #[method = "server.peers.subscribe"]
+    #[method = "blockchain.block.header"]
+    #[method = "blockchain.block.headers"]
+    #[method = "blockchain.estimatefee"]
+    #[method = "blockchain.headers.subscribe"]
+    #[method = "blockchain.relayfee"]
+    #[method = "mempool.get_fee_histogram"]
+    #[method = "server.ping"]
+    #[method = "server.version"]
+    */
+}
+
+json_rpc_client! {
+    pub type RpcClient<T> {
+        #[notification = "blockchain.scripthash.subscribe"]
+        async fn update_scripthash_status(
+            &mut self,
+            script_hash: &ScriptHash,
+            status: &ScriptHashStatus,
+        ) -> Result<(), ClientSendNotificationError>;
+    }
+}
+
+#[derive(Serialize)]
+pub struct ScriptHashStatus {}
+
+#[derive(Serialize, Deserialize)]
+pub struct RawTx {}
+
