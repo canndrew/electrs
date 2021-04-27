@@ -482,11 +482,18 @@ impl JsonRpcServiceImpl {
             notification_branches.push(notification_branch);
         }
         let self_ty = &self.self_ty;
-        let (impl_generics, type_generics, where_clause_opt) = self.generics.split_for_impl();
+
+        // TODO: for some reason using type_generics here, the ways it's described in the syn docs,
+        // results in the generics being printed on the type twice. However omitting type_generics
+        // still results in generics being printed on the type somehow :/
+        //
+        // This might change or get fixed in a later version of syn.
+        let (impl_generics, _type_generics, where_clause_opt) = self.generics.split_for_impl();
         let impl_token = &self.impl_token;
         quote_spanned! {top_attr_span=>
             #[electrs_json_rpc::_reexports::async_trait]
-            #impl_token #impl_generics electrs_json_rpc::JsonRpcService for #self_ty #type_generics
+            //#impl_token #impl_generics electrs_json_rpc::JsonRpcService for #self_ty #type_generics
+            #impl_token #impl_generics electrs_json_rpc::JsonRpcService for #self_ty
             #where_clause_opt
             {
                 async fn handle_method<'s, 'm>(
