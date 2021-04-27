@@ -4,7 +4,7 @@ use prometheus::{
     self, process_collector::ProcessCollector, Encoder, HistogramOpts, HistogramVec, Registry,
 };
 
-use std::net::SocketAddr;
+use std::{future::Future, net::SocketAddr, time::Instant};
 
 pub struct Metrics {
     reg: Registry,
@@ -37,6 +37,18 @@ impl Histogram {
         self.hist
             .with_label_values(&[label])
             .observe_closure_duration(func)
+    }
+
+    pub async fn observe_duration_async<F>(&self, label: &str, future: F) -> F::Output
+    where
+        F: Future,
+    {
+        let hist = self.hist.with_label_values(&[label]);
+        let instant = Instant::now();
+        let res = future.await;
+        let elapsed = instant.elapsed().as_secs() as f64;
+        hist.observe(elapsed);
+        res
     }
 }
 

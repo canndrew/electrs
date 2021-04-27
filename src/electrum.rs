@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use async_trait::async_trait;
 use bitcoin::{
     consensus::{deserialize, serialize},
     hashes::hex::{FromHex, ToHex},
@@ -7,16 +8,16 @@ use bitcoin::{
 use electrs_json_rpc::{
     json_rpc_client,
     json_rpc_service,
-    DropConnection,
-    //HandleMethodError, DropConnection, JsonRpcService,
-    //json_types::JsonRpcParams,
+    json_types::JsonRpcParams,
     //client::ClientSendNotificationError,
     //json_types::JsonRpcError,
+    DropConnection,
+    HandleMethodError,
+    JsonRpcService,
 };
 use rayon::prelude::*;
 use serde_derive::{Deserialize, Serialize};
 use serde_json::{from_value, json, Value};
-//use async_trait::async_trait;
 
 use std::{collections::HashMap, convert::Infallible, iter::FromIterator};
 
@@ -517,7 +518,6 @@ pub struct ScriptHashStatus {}
 pub struct RawTx {}
 */
 
-/*
 pub struct MetricTrackingRpcService<'r> {
     inner: RpcService<'r>,
 }
@@ -529,24 +529,23 @@ impl<'r> JsonRpcService for MetricTrackingRpcService<'r> {
         method: &'m str,
         params: Option<JsonRpcParams>,
     ) -> Result<Value, HandleMethodError> {
-        self.inner.rpc.rpc_duration.observe_duration(method, || {
-            self.inner.handle_method(method, params).await
-        })
+        self.inner
+            .rpc
+            .rpc_duration
+            .observe_duration_async(method, self.inner.handle_method(method, params))
+            .await
     }
 
-    async fn handle_notification<'s, 'm>(
-        &'s self,
-        method: &'m str,
-        params: Option<JsonRpcParams>,
-    ) {
-        self.inner.rpc.rpc_duration.observe_duration(method, || {
-            self.inner.handle_notification(method, params).await
-        })
+    async fn handle_notification<'s, 'm>(&'s self, method: &'m str, params: Option<JsonRpcParams>) {
+        self.inner
+            .rpc
+            .rpc_duration
+            .observe_duration_async(method, self.inner.handle_notification(method, params))
+            .await
     }
 }
 
-
-
+/*
 use tokio::net::TcpStream;
 
 struct Peer {
