@@ -18,7 +18,7 @@ struct TestService;
 #[json_rpc_service]
 impl TestService {
     #[method = "delay"]
-    async fn delay(millis: u64, reply: String) -> Result<String, JsonRpcError> {
+    async fn delay(millis: u64, reply: String) -> Result<String, Infallible> {
         tokio::time::delay_for(Duration::from_millis(millis)).await;
         Ok(reply)
     }

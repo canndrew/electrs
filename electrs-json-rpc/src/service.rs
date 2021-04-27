@@ -1,6 +1,7 @@
 use super::*;
 
 pub enum HandleMethodError {
+    DropConnection,
     MethodNotFound,
     InvalidParams {
         message: String,
@@ -13,31 +14,44 @@ pub enum HandleMethodError {
     ApplicationError(JsonRpcError),
 }
 
+impl From<JsonRpcError> for HandleMethodError {
+    fn from(json_rpc_error: JsonRpcError) -> HandleMethodError {
+        HandleMethodError::ApplicationError(json_rpc_error)
+    }
+}
+
+impl From<Infallible> for HandleMethodError {
+    fn from(infallible: Infallible) -> HandleMethodError {
+        match infallible {}
+    }
+}
+
 impl HandleMethodError {
-    pub fn into_json_rpc_error(self, method: &str) -> JsonRpcError {
+    pub fn into_json_rpc_error(self, method: &str) -> Option<JsonRpcError> {
         match self {
+            HandleMethodError::DropConnection => None,
             HandleMethodError::MethodNotFound => {
-                JsonRpcError {
+                Some(JsonRpcError {
                     code: JsonRpcErrorCode::METHOD_NOT_FOUND,
                     message: format!("method '{}' not found", method),
                     data: None,
-                }
+                })
             },
             HandleMethodError::InvalidParams { message, data } => {
-                JsonRpcError {
+                Some(JsonRpcError {
                     code: JsonRpcErrorCode::INVALID_PARAMS,
                     message: format!("invalid params: {}", message),
                     data,
-                }
+                })
             },
             HandleMethodError::InternalError { message, data } => {
-                JsonRpcError {
+                Some(JsonRpcError {
                     code: JsonRpcErrorCode::INTERNAL_ERROR,
                     message,
                     data,
-                }
+                })
             },
-            HandleMethodError::ApplicationError(err) => err,
+            HandleMethodError::ApplicationError(err) => Some(err),
         }
     }
 }

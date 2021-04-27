@@ -11,7 +11,7 @@ use {
     std::{
         io, mem, fmt,
         collections::HashMap,
-        convert::{TryFrom, TryInto},
+        convert::{TryFrom, TryInto, Infallible},
         sync::{Arc, Weak},
     },
     tokio::{

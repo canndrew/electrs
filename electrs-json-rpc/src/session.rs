@@ -46,6 +46,12 @@ pub struct JsonRpcSession<A> {
     response_map: Arc<Mutex<ResponseMap>>,
 }
 
+enum ServiceResponse {
+    Responses(JsonRpcResponses),
+    Nothing,
+    DropConnection,
+}
+
 impl<A> JsonRpcSession<A>
 where
     A: AsyncRead + AsyncWrite + Unpin,
@@ -90,9 +96,9 @@ where
         let message_stream = message_reader.into_stream().fuse();
         pin_mut!(message_stream);
         loop {
-            let response_opt = if active_requests.len() < max_concurrent_requests {
+            let service_responses = if active_requests.len() < max_concurrent_requests {
                 futures::select! {
-                    response_opt = active_requests.select_next_some() => response_opt,
+                    service_responses = active_requests.select_next_some() => service_responses,
                     message_res = message_stream.select_next_some() => {
                         match message_res {
                             Ok(JsonRpcMessage::Response(responses)) => {
@@ -107,10 +113,17 @@ where
                                     Some(id) => {
                                         let service = &service;
                                         let future = async move {
-                                            let response = handle_method_call(
+                                            let response_opt = handle_method_call(
                                                 service, id, &method, params,
                                             ).await;
-                                            Some(JsonRpcResponses::Single(response))
+                                            match response_opt {
+                                                Some(response) => {
+                                                    ServiceResponse::Responses(
+                                                        JsonRpcResponses::Single(response)
+                                                    )
+                                                },
+                                                None => ServiceResponse::DropConnection,
+                                            }
                                         };
                                         active_requests.push(
                                             future
@@ -122,7 +135,7 @@ where
                                         let service = &service;
                                         let future = async move {
                                             service.handle_notification(&method, params).await;
-                                            None
+                                            ServiceResponse::Nothing
                                         };
                                         active_requests.push(
                                             future
@@ -153,18 +166,25 @@ where
                                             let responses = responses.clone();
                                             let service = &service;
                                             let future = async move {
-                                                let response = handle_method_call(
+                                                let response_opt = handle_method_call(
                                                     service, id, &method, params,
                                                 ).await;
-                                                let mut responses = responses.lock().await;
-                                                responses.push(response);
-                                                if responses.len() == num_method_calls {
-                                                    let responses = {
-                                                        mem::replace(&mut *responses, Vec::new())
-                                                    };
-                                                    Some(JsonRpcResponses::Batch(responses))
-                                                } else {
-                                                    None
+                                                match response_opt {
+                                                    None => ServiceResponse::Nothing,
+                                                    Some(response) => {
+                                                        let mut responses = responses.lock().await;
+                                                        responses.push(response);
+                                                        if responses.len() == num_method_calls {
+                                                            let responses = {
+                                                                mem::replace(&mut *responses, Vec::new())
+                                                            };
+                                                            ServiceResponse::Responses(
+                                                                JsonRpcResponses::Batch(responses)
+                                                            )
+                                                        } else {
+                                                            ServiceResponse::Nothing
+                                                        }
+                                                    },
                                                 }
                                             };
                                             active_requests.push(
@@ -176,10 +196,8 @@ where
                                         None => {
                                             let service = &service;
                                             let future = async move {
-                                                service
-                                                .handle_notification(&method, params).await;
-
-                                                None
+                                                service.handle_notification(&method, params).await;
+                                                ServiceResponse::Nothing
                                             };
                                             active_requests.push(
                                                 future
@@ -201,23 +219,27 @@ where
                                     let mut message_writer = message_writer.lock().await;
                                     let _ignore = message_writer.write_message(message).await;
                                 }
-                                break Err(ConnectionError::Read { source })
+                                return Err(ConnectionError::Read { source })
                             },
                         }
                         continue;
                     },
-                    complete => break Ok(()),
+                    complete => return Ok(()),
                 }
             } else {
                 active_requests.select_next_some().await
             };
-            if let Some(response) = response_opt {
-                let message = JsonRpcMessage::Response(response);
-                let mut message_writer = message_writer.lock().await;
-                match message_writer.write_message(message).await {
-                    Ok(()) => (),
-                    Err(source) => break Err(ConnectionError::Write { source }),
-                }
+            match service_responses {
+                ServiceResponse::DropConnection => return Ok(()),
+                ServiceResponse::Nothing => (),
+                ServiceResponse::Responses(response) => {
+                    let message = JsonRpcMessage::Response(response);
+                    let mut message_writer = message_writer.lock().await;
+                    match message_writer.write_message(message).await {
+                        Ok(()) => (),
+                        Err(source) => return Err(ConnectionError::Write { source }),
+                    }
+                },
             }
         }
     }
@@ -276,7 +298,7 @@ async fn handle_method_call<S>(
     id: JsonRpcId,
     method: &str,
     params: Option<JsonRpcParams>,
-) -> JsonRpcResponse
+) -> Option<JsonRpcResponse>
 where
     S: JsonRpcService,
 {
@@ -287,9 +309,15 @@ where
             service.handle_method(&method, params).await
         }
     };
-    JsonRpcResponse {
-        id,
-        result: result.map_err(|err| err.into_json_rpc_error(&method)),
-    }
+    let result = match result {
+        Ok(value) => Ok(value),
+        Err(handle_method_error) => {
+            match handle_method_error.into_json_rpc_error(method) {
+                Some(json_rpc_error) => Err(json_rpc_error),
+                None => return None,
+            }
+        },
+    };
+    Some(JsonRpcResponse { id, result })
 }
 

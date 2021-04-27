@@ -186,9 +186,7 @@ impl ServiceMethodSignature {
                     }
                 },
                 Err(err) => {
-                    Err(electrs_json_rpc::HandleMethodError::ApplicationError(
-                        electrs_json_rpc::json_types::JsonRpcError::from(err),
-                    ))
+                    Err(electrs_json_rpc::HandleMethodError::from(err))
                 },
             }
         }
