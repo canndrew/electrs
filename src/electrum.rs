@@ -8,8 +8,8 @@ use rayon::prelude::*;
 use serde_derive::{Deserialize, Serialize};
 use serde_json::{from_value, json, Value};
 use electrs_json_rpc::{
-    json_rpc_service, json_rpc_client,
-    client::ClientSendNotificationError,
+    json_rpc_service, json_rpc_client, HandleMethodError,
+    //client::ClientSendNotificationError,
     json_types::JsonRpcError,
 };
 
@@ -325,11 +325,12 @@ fn notification(method: &str, params: &[Value]) -> Value {
     json!({"jsonrpc": "2.0", "method": method, "params": params})
 }
 
-pub struct RpcService {
+struct RpcService {
 }
 
 #[json_rpc_service]
 impl RpcService {
+    /*
     #[method = "blockchain.scripthash.get_history"]
     pub async fn scripthash_get_history(scripthash: ScriptHash)
         -> Result<Vec<Value>, JsonRpcError>
@@ -374,36 +375,141 @@ impl RpcService {
         unimplemented!()
     }
 
-    /*
     #[method = "blockchain.transaction.get_merkle"]
+    pub async fn transaction_get_merkle(tx_hash: Txid, height: u32)
+        -> Result<MerkleBranch, JsonRpcError>
+    {
+        drop(tx_hash);
+        drop(height);
+        unimplemented!()
+    }
+    */
+
     #[method = "server.banner"]
+    pub async fn banner()
+        -> Result<&'static str, JsonRpcError>
+    {
+        Ok(BANNER)
+    }
+
     #[method = "server.donation_address"]
+    pub async fn donation_address()
+        -> Result<Value, JsonRpcError>
+    {
+        Ok(Value::Null)
+    }
+
+    /*
     #[method = "server.peers.subscribe"]
+    pub async fn peers_subscribe()
+        -> Result<Vec<PeerInfo>, Infallible>
+    {
+        unimplemented!()
+    }
+
     #[method = "blockchain.block.header"]
+    pub async fn block_header(height: BlockHeight)
+        -> Result<BlockHeader, JsonRpcError>
+    {
+        drop(height);
+        unimplemented!()
+    }
+
+    #[method = "blockchain.block.header"]
+    pub async fn block_header_checkpoint(height: BlockHeight, cp_height: BlockHeight)
+        -> Result<JsonValue, JsonRpcError>
+    {
+        drop(height);
+        drop(cp_height);
+        unimplemented!()
+    }
+
     #[method = "blockchain.block.headers"]
+    pub async fn block_headers(start_height: BlockHeight, count: BlockHeightOffset)
+        -> Result<BlockHeaders, JsonRpcError>
+    {
+        drop(start_height);
+        drop(count);
+        unimplemented!()
+    }
+
+    #[method = "blockchain.block.headers"]
+    pub async fn block_headers_checkpoint(start_height: BlockHeight, count: BlockHeightOffset, cp_height: BlockHeight)
+        -> Result<BlockHeaders, JsonRpcError>
+    {
+        drop(start_height);
+        drop(count);
+        drop(cp_height);
+        unimplemented!()
+    }
+
     #[method = "blockchain.estimatefee"]
+    pub async fn estimate_fee(number: BlockHeightOffset)
+        -> Result<FeeRate, JsonRpcError>
+    {
+    }
+
     #[method = "blockchain.headers.subscribe"]
     #[method = "blockchain.relayfee"]
     #[method = "mempool.get_fee_histogram"]
     #[method = "server.ping"]
-    #[method = "server.version"]
     */
+    #[method = "server.version"]
+    pub async fn version_anonymous_client()
+        -> Result<(String, &'static str), HandleMethodError>
+    {
+        RpcService::version_default_protocol(String::new()).await
+    }
+
+    #[method = "server.version"]
+    pub async fn version_default_protocol(client_name: String)
+        -> Result<(String, &'static str), HandleMethodError>
+    {
+        RpcService::version(
+            client_name,
+            Version::Single(String::from(PROTOCOL_VERSION)),
+        ).await
+    }
+
+    #[method = "server.version"]
+    pub async fn version(client_name: String, protocol_version: Version)
+        -> Result<(String, &'static str), HandleMethodError>
+    {
+        match protocol_version {
+            Version::Single(v) |
+            Version::Range(_, v) if v == PROTOCOL_VERSION => (),
+            _ => {
+                info!(
+                    "{} requested {:?}, server supports {}",
+                    client_name,
+                    protocol_version,
+                    PROTOCOL_VERSION
+                );
+                return Err(HandleMethodError::DropConnection);
+            }
+        };
+        let server_id = format!("electrs/{}", ELECTRS_VERSION);
+        Ok((server_id, PROTOCOL_VERSION))
+    }
 }
 
 json_rpc_client! {
     pub type RpcClient<T> {
+        /*
         #[notification = "blockchain.scripthash.subscribe"]
         async fn update_scripthash_status(
             &mut self,
             script_hash: &ScriptHash,
             status: &ScriptHashStatus,
         ) -> Result<(), ClientSendNotificationError>;
+        */
     }
 }
 
+/*
 #[derive(Serialize)]
 pub struct ScriptHashStatus {}
 
 #[derive(Serialize, Deserialize)]
 pub struct RawTx {}
-
+*/
