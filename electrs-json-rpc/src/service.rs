@@ -14,6 +14,8 @@ pub enum HandleMethodError {
     ApplicationError(JsonRpcError),
 }
 
+pub struct DropConnection;
+
 impl From<JsonRpcError> for HandleMethodError {
     fn from(json_rpc_error: JsonRpcError) -> HandleMethodError {
         HandleMethodError::ApplicationError(json_rpc_error)
@@ -23,6 +25,12 @@ impl From<JsonRpcError> for HandleMethodError {
 impl From<Infallible> for HandleMethodError {
     fn from(infallible: Infallible) -> HandleMethodError {
         match infallible {}
+    }
+}
+
+impl From<DropConnection> for HandleMethodError {
+    fn from(DropConnection: DropConnection) -> HandleMethodError {
+        HandleMethodError::DropConnection
     }
 }
 

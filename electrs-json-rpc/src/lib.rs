@@ -4,7 +4,7 @@
 pub use {
     electrs_json_rpc_macro::{json_rpc_service, json_rpc_client},
     crate::session::JsonRpcSession,
-    crate::service::{JsonRpcService, HandleMethodError},
+    crate::service::{JsonRpcService, HandleMethodError, DropConnection},
 };
 
 use {
