@@ -5,10 +5,10 @@ macro_rules! json_rpc_error_code (
     ($lit:literal) => {{
         const __CODE: i16 = $lit;
         const __CODE_REVERSED: usize = (std::i16::MAX as i64 - __CODE as i64) as usize;
-        const __CODE_OUT_OF_RANGE: usize = __CODE_REVERSED / ((std::i16::MAX as i64 - JsonRpcErrorCode::MAX_RESERVED_ERROR_CODE as i64) as usize);
+        const __CODE_OUT_OF_RANGE: usize = __CODE_REVERSED / ((std::i16::MAX as i64 - electrs_json_rpc::json_types::JsonRpcErrorCode::MAX_RESERVED_ERROR_CODE as i64) as usize);
         const __JSON_RPC_ERROR_CODE_OUT_OF_RANGE: [(); __CODE_OUT_OF_RANGE] = [];
 
-        JsonRpcErrorCode::new_unchecked($lit)
+        electrs_json_rpc::json_types::JsonRpcErrorCode::new_unchecked($lit)
     }}
 );
 
