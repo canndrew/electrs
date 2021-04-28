@@ -8,9 +8,9 @@ use bitcoin::{
 use electrs_json_rpc::{
     json_rpc_client,
     json_rpc_service,
-    json_types::JsonRpcParams,
+    json_rpc_error_code,
+    json_types::{JsonRpcParams, JsonRpcError, JsonRpcErrorCode},
     //client::ClientSendNotificationError,
-    //json_types::JsonRpcError,
     DropConnection,
     HandleMethodError,
     JsonRpcService,
@@ -23,14 +23,61 @@ use std::{collections::HashMap, convert::Infallible, iter::FromIterator};
 
 use crate::{
     cache::Cache, daemon::Daemon, merkle::Proof, metrics::Histogram, status::Status,
-    tracker::Tracker, types::ScriptHash,
+    tracker::Tracker, types::{ScriptHash, StatusHash},
 };
 
 const ELECTRS_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PROTOCOL_VERSION: &str = "1.4";
 const BANNER: &str = "Welcome to the Electrum Rust Server!";
 
-const UNKNOWN_FEE: isize = -1; // (allowed by Electrum protocol)
+const UNKNOWN_FEE: f64 = -1.0; // (allowed by Electrum protocol)
+
+const BAD_REQUEST: JsonRpcErrorCode = json_rpc_error_code!(1);
+const DAEMON_ERROR: JsonRpcErrorCode = json_rpc_error_code!(2);
+
+pub enum ElectrumRpcError {
+    BadRequest {
+        message: String,
+    },
+    DaemonError {
+        message: String,
+    },
+}
+
+impl From<Infallible> for ElectrumRpcError {
+    fn from(infallible: Infallible) -> ElectrumRpcError {
+        match infallible {}
+    }
+}
+
+impl From<anyhow::Error> for ElectrumRpcError {
+    fn from(error: anyhow::Error) -> ElectrumRpcError {
+        let message = error.to_string();
+        if error.is::<bitcoincore_rpc::Error>() {
+            ElectrumRpcError::DaemonError { message }
+        } else {
+            ElectrumRpcError::BadRequest { message }
+        }
+    }
+}
+
+impl From<ElectrumRpcError> for HandleMethodError {
+    fn from(electrum_rpc_error: ElectrumRpcError) -> HandleMethodError {
+        let json_rpc_error = match electrum_rpc_error {
+            ElectrumRpcError::BadRequest { message } => JsonRpcError {
+                code: BAD_REQUEST,
+                message,
+                data: None,
+            },
+            ElectrumRpcError::DaemonError { message } => JsonRpcError {
+                code: DAEMON_ERROR,
+                message,
+                data: None,
+            },
+        };
+        HandleMethodError::ApplicationError(json_rpc_error)
+    }
+}
 
 /// Per-client Electrum protocol state
 #[derive(Default)]
@@ -74,7 +121,7 @@ impl From<TxGetArgs> for (Txid, bool) {
 
 /// Electrum RPC handler
 pub struct Rpc {
-    tracker: Tracker,
+    tracker: RwLock<Tracker>,
     cache: Cache,
     rpc_duration: Histogram,
     daemon: Daemon,
@@ -88,6 +135,7 @@ impl Rpc {
             &["method"],
         );
         let cache = Cache::new();
+        let tracker = RwLock::new(tracker);
         Self {
             tracker,
             cache,
@@ -136,136 +184,98 @@ impl Rpc {
         Ok(notifications)
     }
 
-    pub fn handle_request(&self, client: &mut Client, value: Value) -> Result<Value> {
-        let Request {
-            id,
-            jsonrpc,
-            method,
-            params,
-        } = from_value(value).context("invalid request")?;
-        self.rpc_duration.observe_duration(&method, || {
-            let result = match method.as_str() {
-                "blockchain.scripthash.get_history" => {
-                    self.scripthash_get_history(client, from_value(params)?)
-                }
-                "blockchain.scripthash.subscribe" => {
-                    self.scripthash_subscribe(client, from_value(params)?)
-                }
-                "blockchain.transaction.broadcast" => {
-                    self.transaction_broadcast(from_value(params)?)
-                }
-                "blockchain.transaction.get" => self.transaction_get(from_value(params)?),
-                "blockchain.transaction.get_merkle" => {
-                    self.transaction_get_merkle(from_value(params)?)
-                }
-                "server.banner" => Ok(json!(BANNER)),
-                "server.donation_address" => Ok(Value::Null),
-                "server.peers.subscribe" => Ok(json!([])),
-                "blockchain.block.header" => self.block_header(from_value(params)?),
-                "blockchain.block.headers" => self.block_headers(from_value(params)?),
-                "blockchain.estimatefee" => self.estimate_fee(from_value(params)?),
-                "blockchain.headers.subscribe" => self.headers_subscribe(client),
-                "blockchain.relayfee" => self.relayfee(),
-                "mempool.get_fee_histogram" => self.get_fee_histogram(),
-                "server.ping" => Ok(Value::Null),
-                //"server.version" => self.version(from_value(params)?),
-                &_ => bail!("unknown method '{}' with {}", method, params,),
-            };
-
-            Ok(match result {
-                Ok(value) => json!({"jsonrpc": jsonrpc, "id": id, "result": value}),
-                Err(err) => {
-                    let msg = format!("RPC failed: {:#}", err);
-                    warn!("{}", msg);
-                    let error = json!({"code": 1, "message": msg});
-                    json!({"jsonrpc": jsonrpc, "id": id, "error": error})
-                }
-            })
-        })
+    pub fn handle_request(&self, _client: &mut Client, _value: Value) -> Result<Value> {
+        unimplemented!()
     }
 
-    fn headers_subscribe(&self, client: &mut Client) -> Result<Value> {
+    fn headers_subscribe(&self, client: &mut Client) -> Value {
         let chain = self.tracker.chain();
         client.tip = Some(chain.tip());
         let height = chain.height();
         let header = chain.get_block_header(height).unwrap();
-        Ok(json!({"hex": serialize(header).to_hex(), "height": height}))
+        json!({"hex": serialize(header).to_hex(), "height": height})
     }
 
-    fn block_header(&self, (height,): (usize,)) -> Result<Value> {
+    fn block_header(&self, height: usize) -> Result<String, ElectrumRpcError> {
         let chain = self.tracker.chain();
         let header = match chain.get_block_header(height) {
-            None => bail!("no header at {}", height),
+            None => Err(anyhow!("no header at {}", height))?,
             Some(header) => header,
         };
-        Ok(json!(serialize(header).to_hex()))
+        Ok(serialize(header).to_hex())
     }
 
-    fn block_headers(&self, (start_height, count): (usize, usize)) -> Result<Value> {
+    fn block_headers(&self, start_height: usize, count: usize) -> Value {
         let chain = self.tracker.chain();
         let max_count = 2016usize;
 
         let count = std::cmp::min(
             std::cmp::min(count, max_count),
-            chain.height() - start_height + 1,
+            (chain.height() + 1).saturating_sub(start_height),
         );
         let heights = start_height..(start_height + count);
         let hex_headers = String::from_iter(
             heights.map(|height| serialize(chain.get_block_header(height).unwrap()).to_hex()),
         );
 
-        Ok(json!({"count": count, "hex": hex_headers, "max": max_count}))
+        json!({"count": count, "hex": hex_headers, "max": max_count})
     }
 
-    fn estimate_fee(&self, (nblocks,): (u16,)) -> Result<Value> {
+    fn estimate_fee(&self, nblocks: u16) -> Result<f64, ElectrumRpcError> {
         Ok(self
             .daemon
             .estimate_fee(nblocks)?
-            .map(|fee_rate| json!(fee_rate.as_btc()))
-            .unwrap_or_else(|| json!(UNKNOWN_FEE)))
+            .map(|fee_rate| fee_rate.as_btc())
+            .unwrap_or_else(|| UNKNOWN_FEE))
     }
 
-    fn relayfee(&self) -> Result<Value> {
-        Ok(json!(self.daemon.get_relay_fee()?.as_btc())) // [BTC/kB]
+    fn relayfee(&self) -> Result<f64, ElectrumRpcError> {
+        Ok(self.daemon.get_relay_fee()?.as_btc()) // [BTC/kB]
     }
 
     fn scripthash_get_history(
         &self,
         client: &Client,
-        (scripthash,): (ScriptHash,),
-    ) -> Result<Value> {
-        let status = client
-            .status
-            .get(&scripthash)
-            .context("no subscription for scripthash")?;
-        Ok(json!(self
+        scripthash: ScriptHash,
+    ) -> Result<Vec<Value>, ElectrumRpcError> {
+        let status = match client.status.get(&scripthash) {
+            Some(status) => status,
+            None => {
+                return Err(ElectrumRpcError::BadRequest {
+                    message: format!("no subscription for scripthash"),
+                });
+            },
+        };
+        Ok(self
             .tracker
             .get_history(status)
-            .collect::<Vec<Value>>()))
+            .collect::<Vec<Value>>())
     }
 
     fn scripthash_subscribe(
         &self,
         client: &mut Client,
-        (scripthash,): (ScriptHash,),
-    ) -> Result<Value> {
+        scripthash: ScriptHash,
+    ) -> Result<StatusHash, ElectrumRpcError> {
         let mut status = Status::new(scripthash);
         self.tracker
             .update_status(&mut status, &self.daemon, &self.cache)?;
-        let statushash = status.statushash();
+        // TODO:
+        // Better type-handling here? We know that the statushash is not None because we just
+        // called sync via update_status.
+        let statushash = status.statushash().unwrap();
         client.status.insert(scripthash, status); // skip if already exists
-        Ok(json!(statushash))
+        Ok(statushash)
     }
 
-    fn transaction_broadcast(&self, (tx_hex,): (String,)) -> Result<Value> {
+    fn transaction_broadcast(&self, tx_hex: String) -> Result<Txid, ElectrumRpcError> {
         let tx_bytes = Vec::from_hex(&tx_hex).context("non-hex transaction")?;
         let tx = deserialize(&tx_bytes).context("invalid transaction")?;
         let txid = self.daemon.broadcast(&tx)?;
-        Ok(json!(txid))
+        Ok(txid)
     }
 
-    fn transaction_get(&self, args: TxGetArgs) -> Result<Value> {
-        let (txid, verbose) = args.into();
+    fn transaction_get(&self, txid: Txid, verbose: bool) -> Result<Value, ElectrumRpcError> {
         if verbose {
             let blockhash = self.tracker.get_blockhash_by_txid(txid);
             return Ok(json!(self.daemon.get_transaction_info(&txid, blockhash)?));
@@ -281,10 +291,11 @@ impl Rpc {
         })
     }
 
-    fn transaction_get_merkle(&self, (txid, height): (Txid, usize)) -> Result<Value> {
+    // TODO: This could return a &Proof, no?
+    fn transaction_get_merkle(&self, txid: Txid, height: usize) -> Result<Value, ElectrumRpcError> {
         let chain = self.tracker.chain();
         let blockhash = match chain.get_block_hash(height) {
-            None => bail!("missing block at {}", height),
+            None => Err(anyhow!("missing block at {}", height))?,
             Some(blockhash) => blockhash,
         };
         let proof_to_value = |proof: &Proof| {
@@ -300,13 +311,13 @@ impl Rpc {
         debug!("txids cache miss: {}", blockhash);
         let txids = self.daemon.get_block_txids(blockhash)?;
         match txids.iter().position(|current_txid| *current_txid == txid) {
-            None => bail!("missing tx {} for merkle proof", txid),
+            None => Err(anyhow!("missing tx {} for merkle proof", txid))?,
             Some(position) => Ok(proof_to_value(&Proof::create(&txids, position))),
         }
     }
 
-    fn get_fee_histogram(&self) -> Result<Value> {
-        Ok(json!(self.tracker.fees_histogram()))
+    fn get_fee_histogram(&self) -> &crate::mempool::Histogram {
+        self.tracker.fees_histogram()
     }
 
     fn version(
@@ -336,65 +347,54 @@ fn notification(method: &str, params: &[Value]) -> Value {
 
 struct RpcService<'r> {
     rpc: &'r Rpc,
-    //peer: Peer,
+    client: Arc<tokio::sync::RwLock<Client>>,
 }
 
 #[json_rpc_service]
 impl<'r> RpcService<'r> {
-    /*
     #[method = "blockchain.scripthash.get_history"]
-    pub async fn scripthash_get_history(scripthash: ScriptHash)
-        -> Result<Vec<Value>, JsonRpcError>
+    pub async fn scripthash_get_history(&self, scripthash: ScriptHash)
+        -> Result<Vec<Value>, ElectrumRpcError>
     {
-        drop(scripthash);
-        unimplemented!()
+        let client = self..client.read().await;
+        self.rpc.scripthash_get_history(&*client, scripthash)
     }
 
     #[method = "blockchain.scripthash.subscribe"]
-    pub async fn scripthash_subscribe(scripthash: ScriptHash)
-        -> Result<ScriptHashStatus, JsonRpcError>
+    pub async fn scripthash_subscribe(&self, scripthash: ScriptHash)
+        -> Result<StatusHash, ElectrumRpcError>
     {
-        drop(scripthash);
-        unimplemented!()
+        let mut client = self..client.write().await;
+        self.rpc.scripthash_subscribe(&mut *client, scripthash)
     }
 
     #[method = "blockchain.transaction.broadcast"]
-    pub async fn transaction_broadcast(raw_tx: RawTx)
-        -> Result<Txid, JsonRpcError>
+    pub async fn transaction_broadcast(&self, raw_tx: String)
+        -> Result<Txid, ElectrumRpcError>
     {
-        drop(raw_tx);
-        unimplemented!()
+        self.rpc.transaction_broadcast(raw_tx)
     }
 
     #[method = "blockchain.transaction.get"]
-    pub async fn transaction_get(tx_hash: Txid)
-        -> Result<RawTx, JsonRpcError>
+    pub async fn transaction_get(&self, tx_hash: Txid)
+        -> Result<Value, ElectrumRpcError>
     {
-        drop(tx_hash);
-        unimplemented!()
+        self.transaction_get_verbose(tx_hash, false).await
     }
 
     #[method = "blockchain.transaction.get"]
-    pub async fn transaction_get_verbose(tx_hash: Txid, verbose: bool)
-        -> Result<RawTx, JsonRpcError>
+    pub async fn transaction_get_verbose(&self, tx_hash: Txid, verbose: bool)
+        -> Result<Value, ElectrumRpcError>
     {
-        if !verbose {
-            return RpcService::transaction_get(tx_hash).await;
-        }
-        drop(tx_hash);
-        drop(verbose);
-        unimplemented!()
+        self.rpc.transaction_get(tx_hash, verbose)
     }
 
     #[method = "blockchain.transaction.get_merkle"]
-    pub async fn transaction_get_merkle(tx_hash: Txid, height: u32)
-        -> Result<MerkleBranch, JsonRpcError>
+    pub async fn transaction_get_merkle(&self, tx_hash: Txid, height: usize)
+        -> Result<Value, ElectrumRpcError>
     {
-        drop(tx_hash);
-        drop(height);
-        unimplemented!()
+        self.rpc.transaction_get_merkle(tx_hash, height)
     }
-    */
 
     #[method = "server.banner"]
     pub async fn banner() -> Result<&'static str, Infallible> {
@@ -406,67 +406,85 @@ impl<'r> RpcService<'r> {
         Ok(Value::Null)
     }
 
-    /*
     #[method = "server.peers.subscribe"]
     pub async fn peers_subscribe()
-        -> Result<Vec<PeerInfo>, Infallible>
+        -> Result<Vec<Value>, Infallible>
     {
-        unimplemented!()
+        Ok(Vec::new())
     }
 
     #[method = "blockchain.block.header"]
-    pub async fn block_header(height: BlockHeight)
-        -> Result<BlockHeader, JsonRpcError>
+    pub async fn block_header(&self, height: usize)
+        -> Result<String, ElectrumRpcError>
     {
-        drop(height);
-        unimplemented!()
+        self.rpc.block_header(height)
     }
 
     #[method = "blockchain.block.header"]
-    pub async fn block_header_checkpoint(height: BlockHeight, cp_height: BlockHeight)
-        -> Result<Value, JsonRpcError>
+    pub async fn block_header_checkpoint(&self, height: usize, cp_height: usize)
+        -> Result<Value, ElectrumRpcError>
     {
-        drop(height);
-        drop(cp_height);
-        unimplemented!()
+        if cp_height != 0 {
+            Err(anyhow!("cp_height argument not supported"))?;
+        }
+        let header = self.block_header(height).await?;
+        Ok(Value::String(header))
     }
 
     #[method = "blockchain.block.headers"]
-    pub async fn block_headers(start_height: BlockHeight, count: BlockHeightOffset)
-        -> Result<BlockHeaders, JsonRpcError>
+    pub async fn block_headers(&self, start_height: usize, count: usize)
+        -> Result<Value, Infallible>
     {
-        drop(start_height);
-        drop(count);
-        unimplemented!()
+        Ok(self.rpc.block_headers(start_height, count))
     }
 
     #[method = "blockchain.block.headers"]
-    pub async fn block_headers_checkpoint(start_height: BlockHeight, count: BlockHeightOffset, cp_height: BlockHeight)
-        -> Result<BlockHeaders, JsonRpcError>
-    {
-        drop(start_height);
-        drop(count);
-        drop(cp_height);
-        unimplemented!()
+    pub async fn block_headers_checkpoint(
+        &self,
+        start_height: usize,
+        count: usize,
+        cp_height: usize,
+    ) -> Result<Value, ElectrumRpcError> {
+        if cp_height != 0 {
+            Err(anyhow!("cp_height argument not supported"))?;
+        }
+        Ok(self.block_headers(start_height, count).await?)
     }
 
     #[method = "blockchain.estimatefee"]
-    pub async fn estimate_fee(number: BlockHeightOffset)
-        -> Result<FeeRate, JsonRpcError>
+    pub async fn estimate_fee(&self, number: u16)
+        -> Result<f64, ElectrumRpcError>
     {
+        self.rpc.estimate_fee(number)
     }
 
     #[method = "blockchain.headers.subscribe"]
+    pub async fn headers_subscribe(&self)
+        -> Result<Value, Infallible>
+    {
+        let mut client = self.peer.client.write().await;
+        Ok(self.rpc.headers_subscribe(&mut *client))
+    }
+
     #[method = "blockchain.relayfee"]
+    pub async fn relayfee(&self) -> Result<f64, ElectrumRpcError> {
+        self.rpc.relayfee()
+    }
+
     #[method = "mempool.get_fee_histogram"]
-    */
+    pub async fn get_fee_histogram(&self) -> Result<&crate::mempool::Histogram, Infallible> {
+        Ok(self.rpc.get_fee_histogram())
+    }
+
     #[method = "server.ping"]
     pub async fn ping() -> Result<Value, Infallible> {
         Ok(Value::Null)
     }
 
     #[method = "server.version"]
-    pub async fn version_anonymous_client(&self) -> Result<(String, &'static str), DropConnection> {
+    pub async fn version_anonymous_client(&self)
+        -> Result<(String, &'static str), DropConnection>
+    {
         self.version_default_protocol(String::new()).await
     }
 
@@ -529,11 +547,17 @@ impl<'r> JsonRpcService for MetricTrackingRpcService<'r> {
         method: &'m str,
         params: Option<JsonRpcParams>,
     ) -> Result<Value, HandleMethodError> {
-        self.inner
-            .rpc
-            .rpc_duration
-            .observe_duration_async(method, self.inner.handle_method(method, params))
-            .await
+        let result = {
+            self.inner
+                .rpc
+                .rpc_duration
+                .observe_duration_async(method, self.inner.handle_method(method, params))
+                .await
+        };
+        if let Err(err) = &result {
+            warn!("RPC failed: {:#}", err);
+        }
+        result
     }
 
     async fn handle_notification<'s, 'm>(&'s self, method: &'m str, params: Option<JsonRpcParams>) {
@@ -545,11 +569,3 @@ impl<'r> JsonRpcService for MetricTrackingRpcService<'r> {
     }
 }
 
-/*
-use tokio::net::TcpStream;
-
-struct Peer {
-    client: Client,
-    rpc_client: RpcClient<TcpStream>,
-}
-*/
