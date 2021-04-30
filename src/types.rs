@@ -66,7 +66,7 @@ struct ScriptHashPrefix {
 
 impl_consensus_encoding!(ScriptHashPrefix, prefix);
 
-type Height = u32;
+pub type Height = u32;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub(crate) struct ScriptHashRow {
@@ -96,8 +96,8 @@ impl ScriptHashRow {
         deserialize(&row).expect("bad ScriptHashRow")
     }
 
-    pub(crate) fn height(&self) -> usize {
-        self.height.try_into().expect("invalid height")
+    pub(crate) fn height(&self) -> Height {
+        self.height
     }
 }
 
@@ -157,8 +157,8 @@ impl SpendingPrefixRow {
         deserialize(&row).expect("bad SpendingPrefixRow")
     }
 
-    pub(crate) fn height(&self) -> usize {
-        self.height.try_into().expect("invalid height")
+    pub(crate) fn height(&self) -> Height {
+        self.height
     }
 }
 
@@ -205,8 +205,8 @@ impl TxidRow {
         deserialize(&row).expect("bad TxidRow")
     }
 
-    pub(crate) fn height(&self) -> usize {
-        self.height.try_into().expect("invalid height")
+    pub(crate) fn height(&self) -> Height {
+        self.height
     }
 }
 
@@ -231,6 +231,12 @@ impl HeaderRow {
     pub(crate) fn from_db_row(row: &[u8]) -> Self {
         deserialize(&row).expect("bad HeaderRow")
     }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct BlockHeaderAtHeight {
+    hex: String,
+    height: Height,
 }
 
 #[cfg(test)]

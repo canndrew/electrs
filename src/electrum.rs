@@ -10,20 +10,22 @@ use electrs_json_rpc::{
     json_rpc_service,
     json_rpc_error_code,
     json_types::{JsonRpcParams, JsonRpcError, JsonRpcErrorCode},
-    //client::ClientSendNotificationError,
+    client::ClientSendNotificationError,
     DropConnection,
     HandleMethodError,
     JsonRpcService,
 };
 use rayon::prelude::*;
 use serde_derive::{Deserialize, Serialize};
-use serde_json::{from_value, json, Value};
+use serde_json::{json, Value};
+use tokio::sync::RwLock;
 
-use std::{collections::HashMap, convert::Infallible, iter::FromIterator};
+use std::{collections::HashMap, convert::Infallible, iter::FromIterator, sync::Arc};
 
 use crate::{
     cache::Cache, daemon::Daemon, merkle::Proof, metrics::Histogram, status::Status,
-    tracker::Tracker, types::{ScriptHash, StatusHash},
+    tracker::Tracker, types::{ScriptHash, StatusHash, BlockHeaderAtHeight, Height},
+    server::Peer,
 };
 
 const ELECTRS_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -148,6 +150,55 @@ impl Rpc {
         self.tracker.sync(&self.daemon)
     }
 
+    pub async fn update_peer(&self, peer: &mut Peer)
+        -> Result<Result<(), ClientSendNotificationError>>
+    {
+        let tracker = self.tracker.read().await;
+        let chain = tracker.chain();
+        let mut client = peer.client.write().await;
+        for (scripthash, status) in client.status.iter_mut() {
+            if tracker
+                .update_status(status, &self.daemon, &self.cache)
+                .context("failed to update status")?
+            {
+                let result = {
+                    peer
+                    .rpc_client
+                    .scripthash_subscribe(*scripthash, status.statushash())
+                    .await
+                };
+                match result {
+                    Ok(()) => (),
+                    Err(err) => return Ok(Err(err)),
+                }
+            }
+        }
+
+        if let Some(old_tip) = client.tip {
+            let new_tip = chain.tip();
+            if old_tip != new_tip {
+                client.tip = Some(new_tip);
+                let height = chain.height();
+                let header = chain.get_block_header(height).unwrap();
+
+                let block_header_at_height = BlockHeaderAtHeight {
+                    hex: serialize(header).to_hex(),
+                    height,
+                };
+                let result = {
+                    peer
+                    .rpc_client
+                    .headers_subscribe(block_header_at_height).await
+                };
+                match result {
+                    Ok(()) => (),
+                    Err(err) => return Ok(Err(err)),
+                }
+            }
+        }
+        Ok(Ok(()))
+    }
+
     pub fn update_client(&self, client: &mut Client) -> Result<Vec<Value>> {
         let chain = self.tracker.chain();
         let mut notifications = client
@@ -188,15 +239,18 @@ impl Rpc {
         unimplemented!()
     }
 
-    fn headers_subscribe(&self, client: &mut Client) -> Value {
+    fn headers_subscribe(&self, client: &mut Client) -> BlockHeaderAtHeight {
         let chain = self.tracker.chain();
         client.tip = Some(chain.tip());
         let height = chain.height();
         let header = chain.get_block_header(height).unwrap();
-        json!({"hex": serialize(header).to_hex(), "height": height})
+        BlockHeaderAtHeight {
+            hex: serialize(header).to_hex(),
+            height,
+        }
     }
 
-    fn block_header(&self, height: usize) -> Result<String, ElectrumRpcError> {
+    fn block_header(&self, height: Height) -> Result<String, ElectrumRpcError> {
         let chain = self.tracker.chain();
         let header = match chain.get_block_header(height) {
             None => Err(anyhow!("no header at {}", height))?,
@@ -205,7 +259,7 @@ impl Rpc {
         Ok(serialize(header).to_hex())
     }
 
-    fn block_headers(&self, start_height: usize, count: usize) -> Value {
+    fn block_headers(&self, start_height: Height, count: usize) -> Value {
         let chain = self.tracker.chain();
         let max_count = 2016usize;
 
@@ -292,7 +346,7 @@ impl Rpc {
     }
 
     // TODO: This could return a &Proof, no?
-    fn transaction_get_merkle(&self, txid: Txid, height: usize) -> Result<Value, ElectrumRpcError> {
+    fn transaction_get_merkle(&self, txid: Txid, height: Height) -> Result<Value, ElectrumRpcError> {
         let chain = self.tracker.chain();
         let blockhash = match chain.get_block_hash(height) {
             None => Err(anyhow!("missing block at {}", height))?,
@@ -345,18 +399,18 @@ fn notification(method: &str, params: &[Value]) -> Value {
     json!({"jsonrpc": "2.0", "method": method, "params": params})
 }
 
-struct RpcService<'r> {
-    rpc: &'r Rpc,
+pub struct RpcService {
+    rpc: Arc<Rpc>,
     client: Arc<tokio::sync::RwLock<Client>>,
 }
 
 #[json_rpc_service]
-impl<'r> RpcService<'r> {
+impl RpcService {
     #[method = "blockchain.scripthash.get_history"]
     pub async fn scripthash_get_history(&self, scripthash: ScriptHash)
         -> Result<Vec<Value>, ElectrumRpcError>
     {
-        let client = self..client.read().await;
+        let client = self.client.read().await;
         self.rpc.scripthash_get_history(&*client, scripthash)
     }
 
@@ -364,7 +418,7 @@ impl<'r> RpcService<'r> {
     pub async fn scripthash_subscribe(&self, scripthash: ScriptHash)
         -> Result<StatusHash, ElectrumRpcError>
     {
-        let mut client = self..client.write().await;
+        let mut client = self.client.write().await;
         self.rpc.scripthash_subscribe(&mut *client, scripthash)
     }
 
@@ -390,7 +444,7 @@ impl<'r> RpcService<'r> {
     }
 
     #[method = "blockchain.transaction.get_merkle"]
-    pub async fn transaction_get_merkle(&self, tx_hash: Txid, height: usize)
+    pub async fn transaction_get_merkle(&self, tx_hash: Txid, height: Height)
         -> Result<Value, ElectrumRpcError>
     {
         self.rpc.transaction_get_merkle(tx_hash, height)
@@ -414,14 +468,14 @@ impl<'r> RpcService<'r> {
     }
 
     #[method = "blockchain.block.header"]
-    pub async fn block_header(&self, height: usize)
+    pub async fn block_header(&self, height: Height)
         -> Result<String, ElectrumRpcError>
     {
         self.rpc.block_header(height)
     }
 
     #[method = "blockchain.block.header"]
-    pub async fn block_header_checkpoint(&self, height: usize, cp_height: usize)
+    pub async fn block_header_checkpoint(&self, height: Height, cp_height: Height)
         -> Result<Value, ElectrumRpcError>
     {
         if cp_height != 0 {
@@ -432,7 +486,7 @@ impl<'r> RpcService<'r> {
     }
 
     #[method = "blockchain.block.headers"]
-    pub async fn block_headers(&self, start_height: usize, count: usize)
+    pub async fn block_headers(&self, start_height: Height, count: usize)
         -> Result<Value, Infallible>
     {
         Ok(self.rpc.block_headers(start_height, count))
@@ -441,9 +495,9 @@ impl<'r> RpcService<'r> {
     #[method = "blockchain.block.headers"]
     pub async fn block_headers_checkpoint(
         &self,
-        start_height: usize,
+        start_height: Height,
         count: usize,
-        cp_height: usize,
+        cp_height: Height,
     ) -> Result<Value, ElectrumRpcError> {
         if cp_height != 0 {
             Err(anyhow!("cp_height argument not supported"))?;
@@ -460,9 +514,9 @@ impl<'r> RpcService<'r> {
 
     #[method = "blockchain.headers.subscribe"]
     pub async fn headers_subscribe(&self)
-        -> Result<Value, Infallible>
+        -> Result<BlockHeaderAtHeight, Infallible>
     {
-        let mut client = self.peer.client.write().await;
+        let mut client = self.client.write().await;
         Ok(self.rpc.headers_subscribe(&mut *client))
     }
 
@@ -517,14 +571,18 @@ impl<'r> RpcService<'r> {
 
 json_rpc_client! {
     pub type RpcClient<T> {
-        /*
         #[notification = "blockchain.scripthash.subscribe"]
-        async fn update_scripthash_status(
+        async fn scripthash_subscribe(
             &mut self,
-            script_hash: &ScriptHash,
-            status: &ScriptHashStatus,
+            script_hash: ScriptHash,
+            status: Option<StatusHash>,
         ) -> Result<(), ClientSendNotificationError>;
-        */
+
+        #[notification = "blockchain.headers.subscribe"]
+        async fn headers_subscribe(
+            &mut self,
+            header: BlockHeaderAtHeight,
+        ) -> Result<(), ClientSendNotificationError>;
     }
 }
 
@@ -536,12 +594,12 @@ pub struct ScriptHashStatus {}
 pub struct RawTx {}
 */
 
-pub struct MetricTrackingRpcService<'r> {
-    inner: RpcService<'r>,
+pub struct MetricTrackingRpcService {
+    inner: RpcService,
 }
 
 #[async_trait]
-impl<'r> JsonRpcService for MetricTrackingRpcService<'r> {
+impl JsonRpcService for MetricTrackingRpcService {
     async fn handle_method<'s, 'm>(
         &'s self,
         method: &'m str,

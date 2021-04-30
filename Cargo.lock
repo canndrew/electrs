@@ -326,6 +326,7 @@ dependencies = [
  "crossbeam-channel",
  "electrs-json-rpc",
  "env_logger",
+ "futures",
  "hyper",
  "log 0.4.14",
  "prometheus",
@@ -1452,8 +1453,10 @@ dependencies = [
  "mio",
  "mio-uds",
  "pin-project-lite 0.1.12",
+ "signal-hook-registry",
  "slab",
  "tokio-macros",
+ "winapi 0.3.9",
 ]
 
 [[package]]

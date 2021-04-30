@@ -4,11 +4,12 @@ use bitcoin::consensus::deserialize;
 use bitcoin::hashes::hex::FromHex;
 use bitcoin::network::constants;
 use bitcoin::{BlockHash, BlockHeader};
+use crate::types::Height;
 
 pub(crate) struct NewHeader {
     header: BlockHeader,
     hash: BlockHash,
-    height: usize,
+    height: Height,
 }
 
 impl NewHeader {
@@ -72,11 +73,11 @@ impl Chain {
         self.update(new_headers.zip(1..).map(NewHeader::from).collect())
     }
 
-    pub(crate) fn get_block_hash(&self, height: usize) -> Option<BlockHash> {
+    pub(crate) fn get_block_hash(&self, height: Height) -> Option<BlockHash> {
         self.headers.get(height).map(|(hash, _header)| *hash)
     }
 
-    pub(crate) fn get_block_header(&self, height: usize) -> Option<&BlockHeader> {
+    pub(crate) fn get_block_header(&self, height: Height) -> Option<&BlockHeader> {
         self.headers.get(height).map(|(_hash, header)| header)
     }
 
@@ -107,8 +108,8 @@ impl Chain {
         self.headers.last().expect("empty chain").0
     }
 
-    pub(crate) fn height(&self) -> usize {
-        self.headers.len() - 1
+    pub(crate) fn height(&self) -> Height {
+        (self.headers.len() - 1) as Height
     }
 
     pub(crate) fn locator(&self) -> Vec<BlockHash> {
