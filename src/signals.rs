@@ -1,29 +1,48 @@
-use crossbeam_channel::{unbounded, Receiver};
-use signal_hook::consts::signal::*;
-use signal_hook::iterator::Signals;
-
-use std::thread;
+use futures::StreamExt;
+use tokio::{
+    signal::unix::{signal, SignalKind},
+    sync::mpsc::{unbounded_channel, UnboundedReceiver},
+};
 
 pub(crate) enum Signal {
     Exit,
     Trigger,
 }
 
-pub(crate) fn register() -> Receiver<Signal> {
-    let ids = [
-        SIGINT, SIGTERM,
-        SIGUSR1, // allow external triggering (e.g. via bitcoind `blocknotify`)
-    ];
-    let (tx, rx) = unbounded();
-    let mut signals = Signals::new(&ids).expect("failed to register signal hook");
-    thread::spawn(move || {
-        for id in &mut signals {
-            info!("notified via SIG{}", id);
-            let signal = match id {
-                SIGUSR1 => Signal::Trigger,
-                _ => Signal::Exit,
-            };
-            tx.send(signal).expect("failed to send signal");
+pub(crate) fn register() -> UnboundedReceiver<Signal> {
+    let (tx, rx) = unbounded_channel();
+    let mut sigterm = signal(SignalKind::terminate())
+        .expect("failed to register signal hook for SIGTERM")
+        .fuse();
+    let mut sigint = signal(SignalKind::interrupt())
+        .expect("failed to register signal hook for SIGINT")
+        .fuse();
+    let mut sigusr1 = signal(SignalKind::user_defined1())
+        .expect("failed to register signal hook for SIGUSR1")
+        .fuse();
+    tokio::spawn(async move {
+        loop {
+            futures::select! {
+                () = sigterm.select_next_some() => {
+                    info!("notified via SIGTERM");
+                    if tx.send(Signal::Exit).is_err() {
+                        break;
+                    }
+                },
+                () = sigint.select_next_some() => {
+                    info!("notified via SIGINT");
+                    if tx.send(Signal::Exit).is_err() {
+                        break;
+                    }
+                },
+                () = sigusr1.select_next_some() => {
+                    info!("notified via SIGUSR1");
+                    if tx.send(Signal::Trigger).is_err() {
+                        break;
+                    }
+                },
+                complete => break,
+            }
         }
     });
     rx
